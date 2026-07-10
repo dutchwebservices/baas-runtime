@@ -1,0 +1,57 @@
+{
+  "name": "@dutchwebservices/baas-runtime",
+  "version": "0.1.0",
+  "description": "Connect a customer-operated server runtime to BaaS settings, metrics, logs, and events.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean --sourcemap",
+    "test": "tsx --test src/index.test.ts",
+    "check": "tsc --noEmit",
+    "prepack": "npm run build"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dutchwebservices/baas-runtime.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dutchwebservices/baas-runtime/issues"
+  },
+  "homepage": "https://github.com/dutchwebservices/baas-runtime#readme",
+  "keywords": [
+    "baas",
+    "runtime",
+    "metrics",
+    "logs",
+    "settings"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.3.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  }
+}
