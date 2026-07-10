@@ -1,59 +1,101 @@
-# BaaS Runtime SDK
+# BaaS TypeScript SDK
 
-Connect a server you operate yourself to a BaaS project. The SDK reports
-health, metrics, logs, and events, and reads non-secret project settings.
+Use one TypeScript package for an application's data, authentication, runtime
+users, object storage, event stream, webhooks, functions, project settings, and
+server telemetry.
 
 ## Install
 
 The public source installation does not require a package-registry token:
 
 ```bash
-npm install github:dutchwebservices/baas-runtime#v0.1.0
+npm install github:dutchwebservices/baas-runtime#v0.2.0
 ```
 
-The package is also published to GitHub Packages as
-`@dutchwebservices/baas-runtime`. GitHub requires a token to install npm
-packages from that registry, even when a package is public.
+For an agent-assisted integration, install the public Codex skill from
+`dutchwebservices/baas-runtime` at `skills/baas-typescript-integration`, then
+ask Codex to integrate the current app with BaaS. The skill inspects the
+runtime's OpenAPI document, adds typed client code, and verifies the real app
+flow.
 
-```bash
-npm install @dutchwebservices/baas-runtime --registry=https://npm.pkg.github.com
+## Application client
+
+Use `createBaasClient` in browser code, server code, or a BFF. It only uses an
+end-user access token or a machine token. Never put `BAAS_RUNTIME_TOKEN` in
+browser-delivered environment variables.
+
+```ts
+import { createBaasClient } from "@dutchwebservices/baas-runtime";
+
+type Order = {
+  title: string;
+  total: number;
+  status: "draft" | "paid";
+};
+
+export const baas = createBaasClient({
+  url: import.meta.env.VITE_BAAS_URL,
+  persistSession: true,
+});
+
+const session = await baas.auth.signIn({ username, password });
+const orders = baas.entities.collection<Order>("orders");
+const order = await orders.create({ title: "Website order", total: 49, status: "draft" });
+const mine = await orders.list({ limit: 50 });
 ```
 
-## Connect a project
+`createBaasClient` includes:
 
-Install `baas-cli`, then run this from the server project directory:
+- `entities.collection<T>(name)` for typed list/get/create/update/delete
+- `auth` for sign-in, session state, current user, machine-token exchange, and
+  admin runtime-user management
+- `storage` for list/upload/download/delete
+- `events` for event history, authenticated realtime streams, and webhooks
+- `functions` for invoking an HTTP function and managing scheduled runs
+- `health` for health and generated OpenAPI documents
 
-```bash
-baas-cli runtime connect --project YOUR_PROJECT
+The runtime enforces the caller's roles and owner-scoped access. The client is
+only a convenience layer; it never elevates permissions.
+
+## Storage and realtime
+
+```ts
+await baas.storage.upload("products/sku-1.png", file, { contentType: file.type });
+
+const subscription = baas.events.subscribe({
+  entities: ["orders"],
+  onEvent(event) {
+    console.log(event.event_type, event.payload);
+  },
+});
+
+// Later, for example when a React effect is cleaned up:
+subscription.close();
 ```
 
-The command opens a browser for sign-in when necessary, creates a project-only
-connection credential, writes `BAAS_RUNTIME_URL` and `BAAS_RUNTIME_TOKEN` to
-`.env.local`, and installs this package. Keep that env file out of source
-control.
+## Functions
 
-## Use it
+```ts
+const report = await baas.functions.invoke<{ total: number }>("/reports/daily", {
+  body: { date: "2026-07-10" },
+});
+```
+
+## Server telemetry and settings
+
+Use the separate server-only helper after `baas-cli runtime connect`. The CLI
+writes `BAAS_RUNTIME_URL`, `BAAS_RUNTIME_TOKEN`, and the generated runtime's
+`BAAS_APP_URL` to a private `.env.local` file.
 
 ```ts
 import { createBaasRuntime } from "@dutchwebservices/baas-runtime";
 
-const baas = createBaasRuntime({ service: "orders-api" });
-await baas.start();
-
-const settings = await baas.settings.get();
-baas.metrics.increment("orders.created");
-baas.metrics.timing("checkout.duration_ms", 183);
-baas.logs.info("Checkout completed", { orderId: "ord_123" });
-baas.events.publish("order.created", { orderId: "ord_123" });
+const runtime = createBaasRuntime({ service: "orders-api" });
+await runtime.start();
+runtime.metrics.increment("orders.created");
+runtime.logs.info("Checkout completed", { orderId: "ord_123" });
 ```
 
-For an Express-style server:
-
-```ts
-app.use(baas.requestContext());
-app.use(baas.metrics.http());
-```
-
-The SDK is deliberately fail-open. Telemetry delivery failures are retried in
-the background and never fail a customer request. The connection credential is
-for server code only; do not put it in browser-delivered environment variables.
+`BaaSRuntime` reports health, metrics, logs, custom events, and reads non-secret
+project settings. Its connection credential is server-only and does not grant
+data or user access.

@@ -3,7 +3,33 @@
  * Node 18+ servers, including applications that are not hosted by BaaS.
  */
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
+
+export {
+  BaaSClient,
+  BaaSError,
+  createBaasClient,
+  type AccessTokenSource,
+  type AuthSession,
+  type BaaSClientOptions,
+  type BaaSRequestOptions,
+  type EntityCollection,
+  type EntityData,
+  type EntityDocument,
+  type EntityListOptions,
+  type EventListOptions,
+  type FunctionInvokeOptions,
+  type MachineToken,
+  type RealtimeSubscription,
+  type RealtimeSubscriptionOptions,
+  type RuntimeEvent,
+  type RuntimeUser,
+  type StorageListOptions,
+  type StorageObject,
+  type TokenStorage,
+  type WebhookCreateInput,
+  type WebhookSubscription,
+} from "./client.js";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };

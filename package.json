@@ -1,7 +1,7 @@
 {
   "name": "@dutchwebservices/baas-runtime",
-  "version": "0.1.0",
-  "description": "Connect a customer-operated server runtime to BaaS settings, metrics, logs, and events.",
+  "version": "0.2.0",
+  "description": "TypeScript client for BaaS runtime data, auth, storage, events, functions, settings, and telemetry.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -41,9 +41,14 @@
   "keywords": [
     "baas",
     "runtime",
+    "typescript",
+    "auth",
+    "data",
+    "storage",
+    "realtime",
+    "functions",
     "metrics",
-    "logs",
-    "settings"
+    "logs"
   ],
   "engines": {
     "node": ">=18"

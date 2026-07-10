@@ -1,0 +1,4 @@
+interface:
+  display_name: "BaaS TypeScript Integration"
+  short_description: "Integrate a TypeScript app with BaaS runtime APIs"
+  default_prompt: "Use $baas-typescript-integration to add BaaS data, auth, storage, realtime, and functions to this TypeScript app."

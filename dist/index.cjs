@@ -20,20 +20,394 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/index.ts
 var index_exports = {};
 __export(index_exports, {
+  BaaSClient: () => BaaSClient,
+  BaaSError: () => BaaSError,
   BaaSRuntime: () => BaaSRuntime,
   VERSION: () => VERSION,
+  createBaasClient: () => createBaasClient,
   createBaasRuntime: () => createBaasRuntime
 });
 module.exports = __toCommonJS(index_exports);
-var VERSION = "0.1.0";
-var DEFAULT_MAX_QUEUE_SIZE = 1e3;
-var DEFAULT_FLUSH_INTERVAL_MS = 1e3;
-var DEFAULT_TIMEOUT_MS = 5e3;
+
+// src/client.ts
+var BaaSError = class extends Error {
+  status;
+  detail;
+  requestId;
+  constructor(message, options) {
+    super(message);
+    this.name = "BaaSError";
+    this.status = options.status;
+    this.detail = options.detail;
+    this.requestId = options.requestId;
+  }
+};
 function processEnv(name) {
   const candidate = globalThis;
   return candidate.process?.env?.[name];
 }
 function normalizedUrl(value) {
+  const raw = value?.trim().replace(/\/+$/, "");
+  return raw || void 0;
+}
+function resolveStorage(options) {
+  if (!options.persistSession) return void 0;
+  if (options.storage) return options.storage;
+  try {
+    const candidate = globalThis;
+    return candidate.localStorage;
+  } catch {
+    return void 0;
+  }
+}
+function encodePath(value) {
+  return value.split("/").filter((part) => part.length > 0).map((part) => encodeURIComponent(part)).join("/");
+}
+function queryString(values) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(values)) {
+    if (value !== void 0 && value !== "") params.set(key, String(value));
+  }
+  const result = params.toString();
+  return result ? `?${result}` : "";
+}
+function delay(ms, signal) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+async function errorFromResponse(response) {
+  const requestId = response.headers.get("x-request-id");
+  let detail;
+  let message = `Request failed with ${response.status}`;
+  try {
+    detail = await response.clone().json();
+    if (typeof detail === "object" && detail && "detail" in detail) {
+      const candidate = detail.detail;
+      message = typeof candidate === "string" ? candidate : message;
+    }
+  } catch {
+    try {
+      const text = (await response.text()).trim();
+      if (text) message = text;
+    } catch {
+    }
+  }
+  return new BaaSError(message, { status: response.status, detail, requestId });
+}
+var BaaSClient = class {
+  url;
+  auth;
+  entities;
+  storage;
+  events;
+  functions;
+  health;
+  fetchImpl;
+  tokenSource;
+  storageAdapter;
+  storageKey;
+  defaultHeaders;
+  accessToken;
+  constructor(options = {}) {
+    const url = normalizedUrl(
+      options.url ?? processEnv("BAAS_APP_URL") ?? processEnv("BAAS_URL") ?? processEnv("VITE_BAAS_URL") ?? processEnv("NEXT_PUBLIC_BAAS_URL")
+    );
+    if (!url) throw new Error("A generated runtime URL is required. Pass url or set BAAS_URL.");
+    this.url = url;
+    this.fetchImpl = options.fetch ?? globalThis.fetch;
+    this.tokenSource = options.accessToken;
+    this.storageAdapter = resolveStorage(options);
+    this.storageKey = options.storageKey ?? `baas.session.${this.url}`;
+    this.defaultHeaders = options.headers ?? {};
+    if (typeof options.accessToken === "string") this.accessToken = options.accessToken;
+    this.auth = {
+      signIn: (input) => this.signIn(input),
+      signOut: () => this.signOut(),
+      restoreSession: () => this.restoreSession(),
+      setAccessToken: (token) => this.setAccessToken(token),
+      getAccessToken: () => this.getAccessToken(),
+      me: () => this.getJson("/api/auth/me"),
+      users: {
+        list: () => this.getJson("/api/auth/users"),
+        create: (input) => this.postJson("/api/auth/users", input),
+        updateRoles: (userId, roles) => this.patchJson(`/api/auth/users/${encodeURIComponent(userId)}/roles`, { roles }),
+        remove: (userId) => this.deleteJson(`/api/auth/users/${encodeURIComponent(userId)}`)
+      },
+      machineToken: (input) => this.machineToken(input)
+    };
+    this.entities = { collection: (name) => this.collection(name) };
+    this.storage = {
+      list: (options2) => this.listStorage(options2),
+      upload: (key, body, options2) => this.uploadStorage(key, body, options2),
+      download: (key, options2) => this.request(`/api/storage/objects/${encodePath(key)}`, { signal: options2?.signal }),
+      remove: (key) => this.deleteJson(`/api/storage/objects/${encodePath(key)}`)
+    };
+    this.events = {
+      list: (options2) => this.listEvents(options2),
+      subscribe: (options2) => this.subscribeEvents(options2),
+      webhooks: {
+        list: () => this.getJson("/api/events/webhooks"),
+        create: (input) => this.postJson("/api/events/webhooks", {
+          url: input.url,
+          event_types: input.eventTypes ?? [],
+          entities: input.entities ?? [],
+          event_name_overrides: input.eventNameOverrides ?? {},
+          description: input.description,
+          enabled: input.enabled ?? true,
+          signing_secret: input.signingSecret
+        }),
+        remove: (webhookId) => this.deleteJson(`/api/events/webhooks/${encodeURIComponent(webhookId)}`),
+        retry: (webhookId) => this.postJson(`/api/events/webhooks/${encodeURIComponent(webhookId)}/retry`, {})
+      }
+    };
+    this.functions = {
+      invoke: (route, invokeOptions) => this.invokeFunction(route, invokeOptions),
+      cron: {
+        list: () => this.getJson("/api/functions/cron"),
+        run: (functionId, triggerId, payload) => this.postJson(
+          `/api/functions/${encodeURIComponent(functionId)}/cron/${encodeURIComponent(triggerId)}/run`,
+          payload === void 0 ? {} : { payload }
+        )
+      }
+    };
+    this.health = {
+      check: () => this.getJson("/health", { auth: false }),
+      openapi: () => this.getJson("/openapi.json", { auth: false })
+    };
+  }
+  async request(path, options = {}) {
+    if (!this.fetchImpl) throw new Error("fetch is not available in this environment");
+    const headers = new Headers(this.defaultHeaders);
+    new Headers(options.headers).forEach((value, key) => headers.set(key, value));
+    if (options.auth !== false) {
+      const token = await this.getAccessToken();
+      if (token && !headers.has("authorization")) headers.set("authorization", `Bearer ${token}`);
+    }
+    headers.set("x-baas-sdk", "@dutchwebservices/baas-runtime");
+    const response = await this.fetchImpl(this.resolve(path), {
+      method: options.method ?? "GET",
+      headers,
+      body: options.body,
+      signal: options.signal
+    });
+    if (!response.ok) throw await errorFromResponse(response);
+    return response;
+  }
+  async getAccessToken() {
+    if (this.accessToken) return this.accessToken;
+    if (typeof this.tokenSource === "function") return this.tokenSource();
+    if (typeof this.tokenSource === "string") return this.tokenSource;
+    return this.restoreSession();
+  }
+  async signIn(input) {
+    const session = await this.postJson("/api/auth/login", input, { auth: false });
+    this.setAccessToken(session.access_token);
+    return session;
+  }
+  signOut() {
+    this.accessToken = void 0;
+    this.storageAdapter?.removeItem(this.storageKey);
+  }
+  restoreSession() {
+    try {
+      const token = this.storageAdapter?.getItem(this.storageKey) ?? void 0;
+      if (token) this.accessToken = token;
+      return token;
+    } catch {
+      return void 0;
+    }
+  }
+  setAccessToken(token) {
+    this.accessToken = token?.trim() || void 0;
+    try {
+      if (this.accessToken) this.storageAdapter?.setItem(this.storageKey, this.accessToken);
+      else this.storageAdapter?.removeItem(this.storageKey);
+    } catch {
+    }
+  }
+  async machineToken(input) {
+    const headers = new Headers({
+      Authorization: `Basic ${toBase64(`${input.clientId}:${input.clientSecret}`)}`,
+      "Content-Type": "application/json"
+    });
+    const response = await this.request("/api/auth/m2m/token", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ grant_type: "client_credentials", scope: input.scope }),
+      auth: false
+    });
+    return response.json();
+  }
+  collection(name) {
+    const entity = encodeURIComponent(name.trim());
+    if (!entity) throw new Error("An entity name is required");
+    return {
+      list: (options = {}) => this.getJson(
+        `/api/entity/${entity}${queryString({ limit: options.limit, offset: options.offset })}`
+      ),
+      get: (id) => this.getJson(`/api/entity/${entity}/${encodeURIComponent(id)}`),
+      create: (data) => this.postJson(`/api/entity/${entity}`, { data }),
+      update: (id, data) => this.patchJson(`/api/entity/${entity}/${encodeURIComponent(id)}`, { data }),
+      remove: (id) => this.deleteJson(`/api/entity/${entity}/${encodeURIComponent(id)}`)
+    };
+  }
+  async listStorage(options = {}) {
+    return this.getJson(
+      `/api/storage/objects${queryString({ prefix: options.prefix, limit: options.limit, offset: options.offset })}`
+    );
+  }
+  async uploadStorage(key, body, options = {}) {
+    const headers = new Headers();
+    if (options.contentType) headers.set("Content-Type", options.contentType);
+    const response = await this.request(`/api/storage/objects/${encodePath(key)}`, {
+      method: "PUT",
+      headers,
+      body
+    });
+    return response.json();
+  }
+  async listEvents(options = {}) {
+    return this.getJson(
+      `/api/events${queryString({
+        limit: options.limit,
+        after: options.after,
+        event_type: options.eventTypes?.join(","),
+        entity: options.entities?.join(",")
+      })}`
+    );
+  }
+  subscribeEvents(options) {
+    const controller = new AbortController();
+    if (options.signal) {
+      if (options.signal.aborted) controller.abort();
+      else options.signal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
+    return {
+      close: () => controller.abort(),
+      done: this.consumeEvents(options, controller.signal)
+    };
+  }
+  async consumeEvents(options, signal) {
+    const reconnect = options.reconnect ?? true;
+    const reconnectDelayMs = Math.max(100, options.reconnectDelayMs ?? 1e3);
+    let after = options.after;
+    while (!signal.aborted) {
+      try {
+        const response = await this.request(
+          `/api/events/stream${queryString({
+            after,
+            event_type: options.eventTypes?.join(","),
+            entity: options.entities?.join(",")
+          })}`,
+          { signal }
+        );
+        if (!response.body) throw new Error("Realtime stream did not return a response body");
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let message = { data: [] };
+        const dispatch = async () => {
+          if (message.data.length === 0) return;
+          const parsed = JSON.parse(message.data.join("\n"));
+          after = parsed.id || message.id || after;
+          await options.onEvent(parsed);
+          message = { data: [] };
+        };
+        while (!signal.aborted) {
+          const { done, value } = await reader.read();
+          buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+          let lineEnd = buffer.indexOf("\n");
+          while (lineEnd >= 0) {
+            const line = buffer.slice(0, lineEnd).replace(/\r$/, "");
+            buffer = buffer.slice(lineEnd + 1);
+            if (!line) await dispatch();
+            else if (line.startsWith("id:")) message.id = line.slice(3).trim();
+            else if (line.startsWith("event:")) message.eventType = line.slice(6).trim();
+            else if (line.startsWith("data:")) message.data.push(line.slice(5).trimStart());
+            lineEnd = buffer.indexOf("\n");
+          }
+          if (done) {
+            await dispatch();
+            break;
+          }
+        }
+      } catch (error) {
+        if (signal.aborted) return;
+        try {
+          options.onError?.(error);
+        } catch {
+        }
+        if (!reconnect) throw error;
+      }
+      if (!reconnect || signal.aborted) return;
+      await delay(reconnectDelayMs, signal);
+    }
+  }
+  async invokeFunction(route, options = {}) {
+    const method = (options.method ?? "POST").toUpperCase();
+    const headers = new Headers(options.headers);
+    let body;
+    if (options.body !== void 0) {
+      if (typeof options.body === "string" || options.body instanceof FormData || options.body instanceof Blob || options.body instanceof URLSearchParams) {
+        body = options.body;
+      } else {
+        headers.set("Content-Type", headers.get("Content-Type") ?? "application/json");
+        body = JSON.stringify(options.body);
+      }
+    }
+    const response = await this.request(route.startsWith("/") ? route : `/${route}`, { method, headers, body });
+    const contentType = response.headers.get("content-type") ?? "";
+    return contentType.includes("application/json") ? response.json() : response.text();
+  }
+  async getJson(path, options = {}) {
+    const response = await this.request(path, { ...options, method: "GET" });
+    return response.json();
+  }
+  async postJson(path, payload, options = {}) {
+    return this.writeJson("POST", path, payload, options);
+  }
+  async patchJson(path, payload, options = {}) {
+    return this.writeJson("PATCH", path, payload, options);
+  }
+  async deleteJson(path) {
+    const response = await this.request(path, { method: "DELETE" });
+    return response.json();
+  }
+  async writeJson(method, path, payload, options = {}) {
+    const headers = new Headers(options.headers);
+    headers.set("Content-Type", "application/json");
+    const response = await this.request(path, { ...options, method, headers, body: JSON.stringify(payload) });
+    return response.json();
+  }
+  resolve(path) {
+    return new URL(path, `${this.url}/`).toString();
+  }
+};
+function toBase64(value) {
+  const nodeBuffer = globalThis.Buffer;
+  if (nodeBuffer) return nodeBuffer.from(value, "utf8").toString("base64");
+  return btoa(unescape(encodeURIComponent(value)));
+}
+function createBaasClient(options = {}) {
+  return new BaaSClient(options);
+}
+
+// src/index.ts
+var VERSION = "0.2.0";
+var DEFAULT_MAX_QUEUE_SIZE = 1e3;
+var DEFAULT_FLUSH_INTERVAL_MS = 1e3;
+var DEFAULT_TIMEOUT_MS = 5e3;
+function processEnv2(name) {
+  const candidate = globalThis;
+  return candidate.process?.env?.[name];
+}
+function normalizedUrl2(value) {
   const raw = value?.trim().replace(/\/+$/, "");
   return raw || void 0;
 }
@@ -87,11 +461,11 @@ var BaaSRuntime = class {
   settingsEtag;
   started = false;
   constructor(options = {}) {
-    this.endpoint = normalizedUrl(options.endpoint ?? processEnv("BAAS_RUNTIME_URL") ?? processEnv("BAAS_API_URL"));
-    this.token = safeString(options.token ?? processEnv("BAAS_RUNTIME_TOKEN")) || void 0;
+    this.endpoint = normalizedUrl2(options.endpoint ?? processEnv2("BAAS_RUNTIME_URL") ?? processEnv2("BAAS_API_URL"));
+    this.token = safeString(options.token ?? processEnv2("BAAS_RUNTIME_TOKEN")) || void 0;
     this.enabled = Boolean(this.endpoint && this.token);
-    this.service = safeString(options.service ?? processEnv("BAAS_RUNTIME_SERVICE")) || void 0;
-    this.environment = safeString(options.environment ?? processEnv("BAAS_RUNTIME_ENV")) || void 0;
+    this.service = safeString(options.service ?? processEnv2("BAAS_RUNTIME_SERVICE")) || void 0;
+    this.environment = safeString(options.environment ?? processEnv2("BAAS_RUNTIME_ENV")) || void 0;
     this.maxQueueSize = Math.max(1, options.maxQueueSize ?? DEFAULT_MAX_QUEUE_SIZE);
     this.flushIntervalMs = Math.max(0, options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS);
     this.timeoutMs = Math.max(100, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
@@ -327,8 +701,11 @@ function createBaasRuntime(options = {}) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  BaaSClient,
+  BaaSError,
   BaaSRuntime,
   VERSION,
+  createBaasClient,
   createBaasRuntime
 });
 //# sourceMappingURL=index.cjs.map
