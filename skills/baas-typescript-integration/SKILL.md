@@ -14,7 +14,7 @@ Turn an existing TypeScript application into a working BaaS client in one focuse
 3. Install the SDK from the public source release:
 
    ```bash
-   npm install github:dutchwebservices/baas-runtime#v0.2.0
+   npm install github:dutchwebservices/baas-runtime#v0.3.0
    ```
 
 4. Add one small client module, such as `src/lib/baas.ts`. Use `createBaasClient` and one public runtime URL env variable:

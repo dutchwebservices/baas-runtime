@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deploy BaaS Apps"
+  short_description: "Create, connect, and deploy BaaS apps with baas-cli"
+  default_prompt: "Use $deploy-baas-apps to create or deploy this app, connect it to BaaS, and verify the deployment."

@@ -1,22 +1,43 @@
-# BaaS TypeScript SDK
+# BaaS TypeScript SDK and Codex Skills
 
-Use one TypeScript package for an application's data, authentication, runtime
-users, object storage, event stream, webhooks, functions, project settings, and
-server telemetry.
+Use the TypeScript package and public Codex skill catalog for an application's
+data, authentication, runtime users, object storage, event stream, webhooks,
+functions, project settings, and server telemetry.
+
+## Install developer tools and skills
+
+Run this once from the BaaS dashboard or terminal:
+
+```bash
+curl -fsSL https://baas.dutchwebservices.com/developer/install.sh | sh
+baas-cli login
+```
+
+The installer adds baas-cli and every published BaaS Codex skill to
+~/.codex/skills. It does not require a package-registry token.
+
+Published skills:
+
+- **deploy-baas-apps**: create, connect, and deploy a BaaS project from a local
+  TypeScript application.
+- **baas-typescript-integration**: add typed data, authentication, storage,
+  events, functions, and server telemetry to an existing TypeScript app.
+
+The catalog is listed in [skills/index.txt](skills/index.txt). Start a Codex
+task and ask it to use the relevant BaaS skill.
 
 ## Install
 
 The public source installation does not require a package-registry token:
 
 ```bash
-npm install github:dutchwebservices/baas-runtime#v0.2.0
+npm install github:dutchwebservices/baas-runtime#v0.3.0
 ```
 
-For an agent-assisted integration, install the public Codex skill from
-`dutchwebservices/baas-runtime` at `skills/baas-typescript-integration`, then
-ask Codex to integrate the current app with BaaS. The skill inspects the
-runtime's OpenAPI document, adds typed client code, and verifies the real app
-flow.
+For an agent-assisted integration, use the public
+baas-typescript-integration skill, then ask Codex to integrate the current
+app with BaaS. The skill inspects the runtime's OpenAPI document, adds typed
+client code, and verifies the real app flow.
 
 ## Application client
 
