@@ -3,7 +3,7 @@
  * Node 18+ servers, including applications that are not hosted by BaaS.
  */
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.4.0";
 
 export {
   BaaSClient,
@@ -45,6 +45,33 @@ export interface RuntimeSettings {
   project: { id: string; slug: string; name: string };
 }
 
+export interface ConnectedRuntimeUser {
+  id: string;
+  username: string;
+  email?: string | null;
+  name?: string | null;
+  roles: string[];
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface ConnectedRuntimeUserCreateInput {
+  username: string;
+  password: string;
+  email?: string | null;
+  name?: string | null;
+  roles: string[];
+}
+
+export interface RuntimeUserAdapter {
+  /** Return users from the application's existing user store. Never include password data. */
+  list: () => Promise<ConnectedRuntimeUser[]>;
+  /** Create a user through the application's normal password hashing and validation path. */
+  create: (input: ConnectedRuntimeUserCreateInput) => Promise<ConnectedRuntimeUser>;
+  /** Delete a user by id, username, or email. */
+  remove: (userRef: string) => Promise<void>;
+}
+
 export interface BaaSRuntimeOptions {
   /** Control-plane API URL. Defaults to BAAS_RUNTIME_URL then BAAS_API_URL. */
   endpoint?: string;
@@ -56,6 +83,10 @@ export interface BaaSRuntimeOptions {
   environment?: string;
   /** Sends an initial heartbeat and keeps the connection visible. Default true. */
   heartbeat?: boolean;
+  /** Exposes the application's existing user store to its BaaS dashboard and CLI. */
+  users?: RuntimeUserAdapter;
+  /** How often user-management commands are checked. Default 2,000ms. */
+  commandPollIntervalMs?: number;
   /** Maximum pending records of each kind. Default 1,000. */
   maxQueueSize?: number;
   /** Flush delay for batched telemetry. Default 1,000ms. */
@@ -120,9 +151,16 @@ type EventRecord = {
 
 type QueueKind = "metrics" | "logs" | "events";
 
+type RuntimeCommand = {
+  id: string;
+  action: "users.create" | "users.delete";
+  payload: Record<string, unknown>;
+};
+
 const DEFAULT_MAX_QUEUE_SIZE = 1_000;
 const DEFAULT_FLUSH_INTERVAL_MS = 1_000;
 const DEFAULT_TIMEOUT_MS = 5_000;
+const DEFAULT_COMMAND_POLL_INTERVAL_MS = 2_000;
 
 function processEnv(name: string): string | undefined {
   const candidate = globalThis as typeof globalThis & {
@@ -167,6 +205,18 @@ function requestHeader(request: RequestLike, name: string): string | undefined {
   return Array.isArray(direct) ? direct[0] : direct;
 }
 
+function connectedUser(user: ConnectedRuntimeUser): ConnectedRuntimeUser {
+  return {
+    id: safeString(user.id),
+    username: safeString(user.username),
+    email: safeString(user.email ?? "") || null,
+    name: safeString(user.name ?? "") || null,
+    roles: Array.from(new Set((user.roles ?? []).map((role) => safeString(role)).filter(Boolean))),
+    created_at: safeString(user.created_at ?? "") || null,
+    updated_at: safeString(user.updated_at ?? "") || null,
+  };
+}
+
 export class BaaSRuntime {
   readonly endpoint?: string;
   readonly enabled: boolean;
@@ -190,6 +240,10 @@ export class BaaSRuntime {
     get: (options?: { force?: boolean }) => Promise<RuntimeSettings | undefined>;
     clear: () => void;
   };
+  readonly users: {
+    /** Immediately refresh the sanitized dashboard/CLI user snapshot. */
+    sync: () => Promise<boolean>;
+  };
 
   private readonly token?: string;
   private readonly service?: string;
@@ -200,6 +254,9 @@ export class BaaSRuntime {
   private readonly attributes: Record<string, JsonValue>;
   private readonly onError?: (error: unknown) => void;
   private readonly fetchImpl?: typeof fetch;
+  private readonly heartbeatEnabled: boolean;
+  private readonly userAdapter?: RuntimeUserAdapter;
+  private readonly commandPollIntervalMs: number;
   private readonly queues: Record<QueueKind, Array<MetricRecord | LogRecord | EventRecord>> = {
     metrics: [],
     logs: [],
@@ -207,6 +264,7 @@ export class BaaSRuntime {
   };
   private flushTimer?: ReturnType<typeof setTimeout>;
   private heartbeatTimer?: ReturnType<typeof setTimeout>;
+  private commandTimer?: ReturnType<typeof setTimeout>;
   private settingsCache?: RuntimeSettings;
   private settingsEtag?: string;
   private started = false;
@@ -223,6 +281,13 @@ export class BaaSRuntime {
     this.attributes = { ...(options.attributes ?? {}) };
     this.onError = options.onError;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
+    this.heartbeatEnabled = options.heartbeat !== false;
+    this.userAdapter = options.users;
+    this.commandPollIntervalMs = Math.max(5, options.commandPollIntervalMs ?? DEFAULT_COMMAND_POLL_INTERVAL_MS);
+
+    if (this.userAdapter && !this.heartbeatEnabled) {
+      throw new Error("Runtime user management requires heartbeat to remain enabled");
+    }
 
     if (options.required && !this.enabled) {
       throw new Error("BAAS_RUNTIME_URL and BAAS_RUNTIME_TOKEN are required for this runtime");
@@ -251,19 +316,31 @@ export class BaaSRuntime {
         this.settingsEtag = undefined;
       },
     };
+    this.users = {
+      sync: () => this.syncUsers(),
+    };
   }
 
   async start(): Promise<void> {
     if (this.started || !this.enabled) return;
     this.started = true;
-    const interval = await this.heartbeat();
-    this.scheduleHeartbeat(interval);
+    if (this.heartbeatEnabled) {
+      const interval = await this.heartbeat();
+      this.scheduleHeartbeat(interval);
+    }
+    if (this.userAdapter) {
+      await this.syncUsers();
+      await this.pollCommands();
+      this.scheduleCommandPoll();
+    }
   }
 
   async shutdown(): Promise<void> {
     this.started = false;
     if (this.heartbeatTimer) clearTimeout(this.heartbeatTimer);
     this.heartbeatTimer = undefined;
+    if (this.commandTimer) clearTimeout(this.commandTimer);
+    this.commandTimer = undefined;
     if (this.flushTimer) clearTimeout(this.flushTimer);
     this.flushTimer = undefined;
     await this.flush();
@@ -412,6 +489,7 @@ export class BaaSRuntime {
         runtime_name: this.service,
         sdk_name: "@dutchwebservices/baas-runtime",
         sdk_version: VERSION,
+        capabilities: this.userAdapter ? ["runtime-users"] : [],
       });
       if (!response) return 0;
       const parsed = (await response.json()) as { heartbeat_interval_seconds?: number };
@@ -429,6 +507,77 @@ export class BaaSRuntime {
       this.scheduleHeartbeat(nextInterval || 60_000);
     }, interval || 60_000);
     allowProcessExit(this.heartbeatTimer);
+  }
+
+  private async syncUsers(): Promise<boolean> {
+    if (!this.enabled || !this.userAdapter) return false;
+    try {
+      const users = (await this.userAdapter.list()).map(connectedUser);
+      if (users.some((user) => !user.id || !user.username)) {
+        throw new Error("Runtime user adapter returned a user without id or username");
+      }
+      return Boolean(await this.post("/runtime/v1/users/sync", { users }));
+    } catch (error) {
+      this.reportError(error);
+      return false;
+    }
+  }
+
+  private async pollCommands(): Promise<void> {
+    if (!this.started || !this.enabled || !this.userAdapter) return;
+    const response = await this.post("/runtime/v1/commands/claim", { limit: 10 });
+    if (!response) return;
+    try {
+      const data = (await response.json()) as { commands?: RuntimeCommand[] };
+      for (const command of data.commands ?? []) await this.executeCommand(command);
+    } catch (error) {
+      this.reportError(error);
+    }
+  }
+
+  private async executeCommand(command: RuntimeCommand): Promise<void> {
+    if (!this.userAdapter || !safeString(command.id)) return;
+    try {
+      if (command.action === "users.create") {
+        const input: ConnectedRuntimeUserCreateInput = {
+          username: safeString(command.payload.username),
+          password: safeString(command.payload.password),
+          email: safeString(command.payload.email) || null,
+          name: safeString(command.payload.name) || null,
+          roles: Array.isArray(command.payload.roles)
+            ? command.payload.roles.map((role) => safeString(role)).filter(Boolean)
+            : [],
+        };
+        if (!input.username || !input.password) throw new Error("User create command is missing username or password");
+        const user = connectedUser(await this.userAdapter.create(input));
+        if (!user.id || !user.username) throw new Error("Runtime user adapter returned a user without id or username");
+        await this.post(`/runtime/v1/commands/${encodeURIComponent(command.id)}/result`, { ok: true, user });
+      } else if (command.action === "users.delete") {
+        const userRef = safeString(command.payload.user_ref);
+        if (!userRef) throw new Error("User delete command is missing user_ref");
+        await this.userAdapter.remove(userRef);
+        await this.post(`/runtime/v1/commands/${encodeURIComponent(command.id)}/result`, { ok: true });
+      } else {
+        throw new Error(`Unsupported runtime command: ${String(command.action)}`);
+      }
+      await this.syncUsers();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Runtime user operation failed";
+      await this.post(`/runtime/v1/commands/${encodeURIComponent(command.id)}/result`, {
+        ok: false,
+        error: message.slice(0, 2_000),
+      });
+      this.reportError(error);
+    }
+  }
+
+  private scheduleCommandPoll(): void {
+    if (!this.started || !this.enabled || !this.userAdapter) return;
+    this.commandTimer = setTimeout(async () => {
+      await this.pollCommands();
+      this.scheduleCommandPoll();
+    }, this.commandPollIntervalMs);
+    allowProcessExit(this.commandTimer);
   }
 
   private async post(path: string, body: unknown): Promise<Response | undefined> {

@@ -399,10 +399,11 @@ function createBaasClient(options = {}) {
 }
 
 // src/index.ts
-var VERSION = "0.2.0";
+var VERSION = "0.4.0";
 var DEFAULT_MAX_QUEUE_SIZE = 1e3;
 var DEFAULT_FLUSH_INTERVAL_MS = 1e3;
 var DEFAULT_TIMEOUT_MS = 5e3;
+var DEFAULT_COMMAND_POLL_INTERVAL_MS = 2e3;
 function processEnv2(name) {
   const candidate = globalThis;
   return candidate.process?.env?.[name];
@@ -434,6 +435,17 @@ function requestHeader(request, name) {
   const direct = headers[name] ?? headers[name.toLowerCase()];
   return Array.isArray(direct) ? direct[0] : direct;
 }
+function connectedUser(user) {
+  return {
+    id: safeString(user.id),
+    username: safeString(user.username),
+    email: safeString(user.email ?? "") || null,
+    name: safeString(user.name ?? "") || null,
+    roles: Array.from(new Set((user.roles ?? []).map((role) => safeString(role)).filter(Boolean))),
+    created_at: safeString(user.created_at ?? "") || null,
+    updated_at: safeString(user.updated_at ?? "") || null
+  };
+}
 var BaaSRuntime = class {
   endpoint;
   enabled;
@@ -441,6 +453,7 @@ var BaaSRuntime = class {
   logs;
   events;
   settings;
+  users;
   token;
   service;
   environment;
@@ -450,6 +463,9 @@ var BaaSRuntime = class {
   attributes;
   onError;
   fetchImpl;
+  heartbeatEnabled;
+  userAdapter;
+  commandPollIntervalMs;
   queues = {
     metrics: [],
     logs: [],
@@ -457,6 +473,7 @@ var BaaSRuntime = class {
   };
   flushTimer;
   heartbeatTimer;
+  commandTimer;
   settingsCache;
   settingsEtag;
   started = false;
@@ -472,6 +489,12 @@ var BaaSRuntime = class {
     this.attributes = { ...options.attributes ?? {} };
     this.onError = options.onError;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
+    this.heartbeatEnabled = options.heartbeat !== false;
+    this.userAdapter = options.users;
+    this.commandPollIntervalMs = Math.max(5, options.commandPollIntervalMs ?? DEFAULT_COMMAND_POLL_INTERVAL_MS);
+    if (this.userAdapter && !this.heartbeatEnabled) {
+      throw new Error("Runtime user management requires heartbeat to remain enabled");
+    }
     if (options.required && !this.enabled) {
       throw new Error("BAAS_RUNTIME_URL and BAAS_RUNTIME_TOKEN are required for this runtime");
     }
@@ -498,17 +521,29 @@ var BaaSRuntime = class {
         this.settingsEtag = void 0;
       }
     };
+    this.users = {
+      sync: () => this.syncUsers()
+    };
   }
   async start() {
     if (this.started || !this.enabled) return;
     this.started = true;
-    const interval = await this.heartbeat();
-    this.scheduleHeartbeat(interval);
+    if (this.heartbeatEnabled) {
+      const interval = await this.heartbeat();
+      this.scheduleHeartbeat(interval);
+    }
+    if (this.userAdapter) {
+      await this.syncUsers();
+      await this.pollCommands();
+      this.scheduleCommandPoll();
+    }
   }
   async shutdown() {
     this.started = false;
     if (this.heartbeatTimer) clearTimeout(this.heartbeatTimer);
     this.heartbeatTimer = void 0;
+    if (this.commandTimer) clearTimeout(this.commandTimer);
+    this.commandTimer = void 0;
     if (this.flushTimer) clearTimeout(this.flushTimer);
     this.flushTimer = void 0;
     await this.flush();
@@ -638,7 +673,8 @@ var BaaSRuntime = class {
       const response = await this.post("/runtime/v1/heartbeat", {
         runtime_name: this.service,
         sdk_name: "@dutchwebservices/baas-runtime",
-        sdk_version: VERSION
+        sdk_version: VERSION,
+        capabilities: this.userAdapter ? ["runtime-users"] : []
       });
       if (!response) return 0;
       const parsed = await response.json();
@@ -655,6 +691,71 @@ var BaaSRuntime = class {
       this.scheduleHeartbeat(nextInterval || 6e4);
     }, interval || 6e4);
     allowProcessExit(this.heartbeatTimer);
+  }
+  async syncUsers() {
+    if (!this.enabled || !this.userAdapter) return false;
+    try {
+      const users = (await this.userAdapter.list()).map(connectedUser);
+      if (users.some((user) => !user.id || !user.username)) {
+        throw new Error("Runtime user adapter returned a user without id or username");
+      }
+      return Boolean(await this.post("/runtime/v1/users/sync", { users }));
+    } catch (error) {
+      this.reportError(error);
+      return false;
+    }
+  }
+  async pollCommands() {
+    if (!this.started || !this.enabled || !this.userAdapter) return;
+    const response = await this.post("/runtime/v1/commands/claim", { limit: 10 });
+    if (!response) return;
+    try {
+      const data = await response.json();
+      for (const command of data.commands ?? []) await this.executeCommand(command);
+    } catch (error) {
+      this.reportError(error);
+    }
+  }
+  async executeCommand(command) {
+    if (!this.userAdapter || !safeString(command.id)) return;
+    try {
+      if (command.action === "users.create") {
+        const input = {
+          username: safeString(command.payload.username),
+          password: safeString(command.payload.password),
+          email: safeString(command.payload.email) || null,
+          name: safeString(command.payload.name) || null,
+          roles: Array.isArray(command.payload.roles) ? command.payload.roles.map((role) => safeString(role)).filter(Boolean) : []
+        };
+        if (!input.username || !input.password) throw new Error("User create command is missing username or password");
+        const user = connectedUser(await this.userAdapter.create(input));
+        if (!user.id || !user.username) throw new Error("Runtime user adapter returned a user without id or username");
+        await this.post(`/runtime/v1/commands/${encodeURIComponent(command.id)}/result`, { ok: true, user });
+      } else if (command.action === "users.delete") {
+        const userRef = safeString(command.payload.user_ref);
+        if (!userRef) throw new Error("User delete command is missing user_ref");
+        await this.userAdapter.remove(userRef);
+        await this.post(`/runtime/v1/commands/${encodeURIComponent(command.id)}/result`, { ok: true });
+      } else {
+        throw new Error(`Unsupported runtime command: ${String(command.action)}`);
+      }
+      await this.syncUsers();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Runtime user operation failed";
+      await this.post(`/runtime/v1/commands/${encodeURIComponent(command.id)}/result`, {
+        ok: false,
+        error: message.slice(0, 2e3)
+      });
+      this.reportError(error);
+    }
+  }
+  scheduleCommandPoll() {
+    if (!this.started || !this.enabled || !this.userAdapter) return;
+    this.commandTimer = setTimeout(async () => {
+      await this.pollCommands();
+      this.scheduleCommandPoll();
+    }, this.commandPollIntervalMs);
+    allowProcessExit(this.commandTimer);
   }
   async post(path, body) {
     try {

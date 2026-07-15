@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { BaaSError, createBaasClient, createBaasRuntime } from "./index.js";
+import { BaaSError, createBaasClient, createBaasRuntime, type ConnectedRuntimeUser } from "./index.js";
 
 function response(body: unknown, init: ResponseInit = {}): Response {
   return new Response(body === undefined ? null : JSON.stringify(body), {
@@ -114,6 +114,99 @@ test("records HTTP timing without requiring an Express dependency", async () => 
   const payload = JSON.parse(String(calls[0].init?.body));
   assert.equal(payload.records[0].name, "http.server.duration");
   assert.equal(payload.records[0].attributes.status_code, 201);
+});
+
+test("manages an existing application user store only when a users adapter is configured", async () => {
+  const users: ConnectedRuntimeUser[] = [
+    {
+      id: "user-1",
+      username: "owner@example.test",
+      email: "owner@example.test",
+      name: "Owner",
+      roles: ["admin"],
+    },
+  ];
+  const createdInputs: unknown[] = [];
+  const removedRefs: string[] = [];
+  const calls: Array<{ url: string; body: unknown }> = [];
+  let claimed = false;
+  const baas = createBaasRuntime({
+    endpoint: "https://api.example.test",
+    token: "baas_rt_example.abcdefghijklmnopqrstuvwxyz",
+    commandPollIntervalMs: 5,
+    users: {
+      list: async () => users,
+      create: async (input) => {
+        createdInputs.push(input);
+        const user = { id: "user-2", ...input, roles: input.roles ?? [] };
+        users.push(user);
+        return user;
+      },
+      remove: async (userRef) => {
+        removedRefs.push(userRef);
+      },
+    },
+    fetch: async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ url: path, body });
+      if (path === "/runtime/v1/commands/claim" && !claimed) {
+        claimed = true;
+        return response({
+          commands: [
+            {
+              id: "command-1",
+              action: "users.create",
+              payload: {
+                username: "new@example.test",
+                email: "new@example.test",
+                name: "New user",
+                password: "temporary-secret",
+                roles: ["admin"],
+              },
+            },
+            { id: "command-2", action: "users.delete", payload: { user_ref: "user-1" } },
+          ],
+        });
+      }
+      return response(path === "/runtime/v1/commands/claim" ? { commands: [] } : { accepted: 1 });
+    },
+  });
+
+  await baas.start();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  await baas.shutdown();
+
+  assert.deepEqual(createdInputs, [
+    {
+      username: "new@example.test",
+      email: "new@example.test",
+      name: "New user",
+      password: "temporary-secret",
+      roles: ["admin"],
+    },
+  ]);
+  assert.deepEqual(removedRefs, ["user-1"]);
+  const heartbeat = calls.find((call) => call.url === "/runtime/v1/heartbeat");
+  assert.deepEqual((heartbeat?.body as { capabilities?: string[] }).capabilities, ["runtime-users"]);
+  assert.ok(calls.some((call) => call.url === "/runtime/v1/users/sync"));
+  const results = calls.filter((call) => call.url.endsWith("/result"));
+  assert.equal(results.length, 2);
+  assert.doesNotMatch(JSON.stringify(results), /temporary-secret/);
+});
+
+test("rejects a users adapter when heartbeat is disabled", () => {
+  assert.throws(
+    () => createBaasRuntime({
+      heartbeat: false,
+      users: {
+        list: async () => [],
+        create: async () => ({ id: "never", username: "never", roles: [] }),
+        remove: async () => undefined,
+      },
+    }),
+    /requires heartbeat/,
+  );
 });
 
 test("uses an end-user token for typed entity CRUD without exposing the runtime credential", async () => {

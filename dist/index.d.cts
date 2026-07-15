@@ -266,7 +266,7 @@ declare function createBaasClient(options?: BaaSClientOptions): BaaSClient;
  * BaaS Runtime SDK.  It has no runtime dependencies and is safe to use in
  * Node 18+ servers, including applications that are not hosted by BaaS.
  */
-declare const VERSION = "0.2.0";
+declare const VERSION = "0.4.0";
 
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | {
@@ -285,6 +285,30 @@ interface RuntimeSettings {
         name: string;
     };
 }
+interface ConnectedRuntimeUser {
+    id: string;
+    username: string;
+    email?: string | null;
+    name?: string | null;
+    roles: string[];
+    created_at?: string | null;
+    updated_at?: string | null;
+}
+interface ConnectedRuntimeUserCreateInput {
+    username: string;
+    password: string;
+    email?: string | null;
+    name?: string | null;
+    roles: string[];
+}
+interface RuntimeUserAdapter {
+    /** Return users from the application's existing user store. Never include password data. */
+    list: () => Promise<ConnectedRuntimeUser[]>;
+    /** Create a user through the application's normal password hashing and validation path. */
+    create: (input: ConnectedRuntimeUserCreateInput) => Promise<ConnectedRuntimeUser>;
+    /** Delete a user by id, username, or email. */
+    remove: (userRef: string) => Promise<void>;
+}
 interface BaaSRuntimeOptions {
     /** Control-plane API URL. Defaults to BAAS_RUNTIME_URL then BAAS_API_URL. */
     endpoint?: string;
@@ -296,6 +320,10 @@ interface BaaSRuntimeOptions {
     environment?: string;
     /** Sends an initial heartbeat and keeps the connection visible. Default true. */
     heartbeat?: boolean;
+    /** Exposes the application's existing user store to its BaaS dashboard and CLI. */
+    users?: RuntimeUserAdapter;
+    /** How often user-management commands are checked. Default 2,000ms. */
+    commandPollIntervalMs?: number;
     /** Maximum pending records of each kind. Default 1,000. */
     maxQueueSize?: number;
     /** Flush delay for batched telemetry. Default 1,000ms. */
@@ -350,6 +378,10 @@ declare class BaaSRuntime {
         }) => Promise<RuntimeSettings | undefined>;
         clear: () => void;
     };
+    readonly users: {
+        /** Immediately refresh the sanitized dashboard/CLI user snapshot. */
+        sync: () => Promise<boolean>;
+    };
     private readonly token?;
     private readonly service?;
     private readonly environment?;
@@ -359,9 +391,13 @@ declare class BaaSRuntime {
     private readonly attributes;
     private readonly onError?;
     private readonly fetchImpl?;
+    private readonly heartbeatEnabled;
+    private readonly userAdapter?;
+    private readonly commandPollIntervalMs;
     private readonly queues;
     private flushTimer?;
     private heartbeatTimer?;
+    private commandTimer?;
     private settingsCache?;
     private settingsEtag?;
     private started;
@@ -381,10 +417,14 @@ declare class BaaSRuntime {
     private httpMiddleware;
     private heartbeat;
     private scheduleHeartbeat;
+    private syncUsers;
+    private pollCommands;
+    private executeCommand;
+    private scheduleCommandPoll;
     private post;
     private request;
     private reportError;
 }
 declare function createBaasRuntime(options?: BaaSRuntimeOptions): BaaSRuntime;
 
-export { type AccessTokenSource, type AuthSession, BaaSClient, type BaaSClientOptions, BaaSError, type BaaSRequestOptions, BaaSRuntime, type BaaSRuntimeOptions, type EntityCollection, type EntityData, type EntityDocument, type EntityListOptions, type EventListOptions, type FunctionInvokeOptions, type HttpMiddleware, type JsonPrimitive, type JsonValue, type LogLevel, type MachineToken, type MetricKind, type Next, type RealtimeSubscription, type RealtimeSubscriptionOptions, type RequestLike, type ResponseLike, type RuntimeEvent, type RuntimeSettings, type RuntimeUser, type StorageListOptions, type StorageObject, type TokenStorage, VERSION, type WebhookCreateInput, type WebhookSubscription, createBaasClient, createBaasRuntime };
+export { type AccessTokenSource, type AuthSession, BaaSClient, type BaaSClientOptions, BaaSError, type BaaSRequestOptions, BaaSRuntime, type BaaSRuntimeOptions, type ConnectedRuntimeUser, type ConnectedRuntimeUserCreateInput, type EntityCollection, type EntityData, type EntityDocument, type EntityListOptions, type EventListOptions, type FunctionInvokeOptions, type HttpMiddleware, type JsonPrimitive, type JsonValue, type LogLevel, type MachineToken, type MetricKind, type Next, type RealtimeSubscription, type RealtimeSubscriptionOptions, type RequestLike, type ResponseLike, type RuntimeEvent, type RuntimeSettings, type RuntimeUser, type RuntimeUserAdapter, type StorageListOptions, type StorageObject, type TokenStorage, VERSION, type WebhookCreateInput, type WebhookSubscription, createBaasClient, createBaasRuntime };
