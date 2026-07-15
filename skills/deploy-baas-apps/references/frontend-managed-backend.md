@@ -30,7 +30,7 @@ cat package.json
 Install the public TypeScript client and use the generated runtime URL through the framework's public environment convention:
 
 ```bash
-npm install github:dutchwebservices/baas-runtime#v0.3.0
+npm install github:dutchwebservices/baas-runtime#v0.4.0
 ```
 
 Example client module:

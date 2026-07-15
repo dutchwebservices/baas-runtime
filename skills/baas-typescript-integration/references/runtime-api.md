@@ -6,7 +6,8 @@ Use this reference while integrating the TypeScript SDK. The SDK surface mirrors
 | --- | --- | --- | --- |
 | Entity CRUD | `entities.collection<T>(name)` | `/api/entity/{entity}` | End user or machine token |
 | Sign-in/current user | `auth.signIn`, `auth.me` | `/api/auth/login`, `/api/auth/me` | Public sign-in, then user token |
-| Runtime users | `auth.users` | `/api/auth/users` | Runtime admin only |
+| Generated-runtime users | `auth.users` | `/api/auth/users` | Runtime admin only |
+| Own-runtime users | `createBaasRuntime({ users })` | Connected command/sync protocol | Existing server user service |
 | Machine token exchange | `auth.machineToken` | `/api/auth/m2m/token` | Server only; never browser secrets |
 | Object storage | `storage` | `/api/storage/objects/{key}` | End user or machine token |
 | Realtime event stream | `events.subscribe` | `/api/events/stream` | Runtime admin only |
@@ -42,3 +43,39 @@ export async function createProduct(input: Product) {
 ```
 
 After sign-in, call `baas.auth.setAccessToken(session.access_token)`. Set `persistSession: true` only when the product deliberately keeps a browser session across reloads.
+
+## Connected Own-Runtime Users
+
+Use `createBaasClient().auth.users` only when calling a generated runtime's
+admin user endpoints. For an application that owns its server and user store,
+configure `createBaasRuntime({ users })` instead. The adapter must wrap the
+existing repository/service rather than introducing a second user database.
+
+```ts
+const runtime = createBaasRuntime({
+  service: "api",
+  users: {
+    list: async () => (await userRepository.list()).map(toBaasUser),
+    create: async (input) => toBaasUser(await userService.create(input)),
+    remove: async (userRef) => userService.remove(userRef),
+  },
+});
+
+await runtime.start();
+```
+
+The control plane stores only a synchronized safe profile index. Passwords are
+delivered only to the connected server for a create command and must be hashed
+by the application's normal auth service. Passwords and hashes must never
+appear in adapter results, telemetry, logs, or sync output.
+
+A proper connection requires all of the following:
+
+1. `baas-cli runtime connect --project PROJECT_ID` has configured the server.
+2. SDK 0.4.0 or newer is running in a long-lived server process.
+3. A `users` adapter is configured and advertises the `runtime-users` capability.
+4. The runtime heartbeat is current.
+
+After an out-of-band user mutation, call `await runtime.users.sync()`. Verify
+the bridge with `baas-cli users list PROJECT_ID`, followed by disposable
+create/delete commands.
