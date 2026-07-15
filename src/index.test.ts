@@ -325,6 +325,81 @@ test("rejects a storage adapter when heartbeat is disabled", () => {
   );
 });
 
+test("advertises a verified integration manifest without exposing probe errors", async () => {
+  const calls: Array<{ url: string; body: unknown }> = [];
+  const reportedErrors: unknown[] = [];
+  const baas = createBaasRuntime({
+    endpoint: "https://api.example.test",
+    token: "baas_rt_example.abcdefghijklmnopqrstuvwxyz",
+    users: {
+      list: async () => [],
+      create: async () => ({ id: "user-1", username: "user-1", roles: [] }),
+      remove: async () => undefined,
+    },
+    storage: {
+      list: async () => [],
+      write: async ({ key, data }) => ({ key, size: data.byteLength }),
+      read: async (key) => ({ key, size: 0, data: new Uint8Array() }),
+      remove: async () => undefined,
+    },
+    integrations: {
+      redis: async () => true,
+      "schema-builder": async () => true,
+      "service-accounts": async () => false,
+      "baas-functions": async () => {
+        throw new Error("private infrastructure detail");
+      },
+      cron: async () => true,
+      webhooks: async () => true,
+      "event-stream": async () => true,
+      "object-file-api": async () => true,
+    },
+    onError: (error) => reportedErrors.push(error),
+    fetch: async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ url: path, body });
+      return response(path === "/runtime/v1/commands/claim" ? { commands: [] } : { accepted: 1 });
+    },
+  });
+
+  await baas.start();
+  await baas.shutdown();
+
+  const heartbeat = calls.find((call) => call.url === "/runtime/v1/heartbeat");
+  const body = heartbeat?.body as {
+    capability_manifest_version?: number;
+    capabilities?: string[];
+    integration_manifest?: Array<Record<string, string>>;
+  };
+  assert.equal(body.capability_manifest_version, 1);
+  assert.deepEqual(body.capabilities, ["runtime-users", "object-storage"]);
+  assert.deepEqual(body.integration_manifest, [
+    { key: "runtime-users", status: "enabled", verification: "adapter" },
+    { key: "blob-storage", status: "enabled", verification: "adapter" },
+    { key: "redis", status: "enabled", verification: "probe" },
+    { key: "schema-builder", status: "enabled", verification: "probe" },
+    { key: "service-accounts", status: "degraded", verification: "probe" },
+    { key: "baas-functions", status: "degraded", verification: "probe" },
+    { key: "cron", status: "enabled", verification: "probe" },
+    { key: "webhooks", status: "enabled", verification: "probe" },
+    { key: "event-stream", status: "enabled", verification: "probe" },
+    { key: "object-file-api", status: "enabled", verification: "probe" },
+  ]);
+  assert.equal(reportedErrors.length, 1);
+  assert.doesNotMatch(JSON.stringify(body), /private infrastructure detail/);
+});
+
+test("rejects integration probes when heartbeat is disabled", () => {
+  assert.throws(
+    () => createBaasRuntime({
+      heartbeat: false,
+      integrations: { redis: async () => true },
+    }),
+    /requires heartbeat/,
+  );
+});
+
 test("uses an end-user token for typed entity CRUD without exposing the runtime credential", async () => {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const client = createBaasClient({

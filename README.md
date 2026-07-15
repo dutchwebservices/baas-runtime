@@ -9,7 +9,7 @@ server telemetry.
 The public source installation does not require a package-registry token:
 
 ```bash
-npm install github:dutchwebservices/baas-runtime#v0.5.0
+npm install github:dutchwebservices/baas-runtime#v0.6.0
 ```
 
 For an agent-assisted integration, install the public Codex skill from
@@ -119,6 +119,16 @@ const runtime = createBaasRuntime({
       await objectStore.remove(key);
     },
   },
+  integrations: {
+    redis: () => cache.healthCheck(),
+    "schema-builder": () => schemaBridge.isReady(),
+    "service-accounts": () => authBridge.supportsServiceAccounts(),
+    "baas-functions": () => functionRegistry.isReady(),
+    cron: () => scheduler.isReady(),
+    webhooks: () => webhookDelivery.isReady(),
+    "event-stream": () => eventStream.isReady(),
+    "object-file-api": () => objectRoutes.healthCheck(),
+  },
 });
 await runtime.start();
 runtime.metrics.increment("orders.created");
@@ -148,6 +158,16 @@ application's existing object-store service. The SDK advertises this capability
 only while the adapter is configured and its heartbeat is current, so an
 organization admin can distinguish a real integration from configuration
 alone. Provider credentials remain inside the application.
+
+The `integrations` probes make the connected runtime's implementation status
+visible in the BaaS dashboard. A probe must be a bounded, side-effect-free
+readiness check for the running service; never return a hardcoded `true`.
+`users` automatically verifies `runtime-users`, while `storage` automatically
+verifies `blob-storage`. The remaining supported probes are `redis`,
+`schema-builder`, `service-accounts`, `baas-functions`, `cron`, `webhooks`,
+`event-stream`, and `object-file-api`. A false result or thrown error is
+reported as degraded without sending the error or internal connection details
+to the control plane.
 
 Dashboard and CLI transfers through the administration bridge are limited to
 4 MiB per object. Use `createBaasClient().storage` or the application's direct

@@ -3,7 +3,7 @@
  * Node 18+ servers, including applications that are not hosted by BaaS.
  */
 
-export const VERSION = "0.5.0";
+export const VERSION = "0.6.0";
 
 export {
   BaaSClient,
@@ -110,6 +110,31 @@ export interface RuntimeObjectStorageAdapter {
   remove: (key: string) => Promise<void>;
 }
 
+export const RUNTIME_INTEGRATION_CAPABILITIES = [
+  "runtime-users",
+  "blob-storage",
+  "redis",
+  "schema-builder",
+  "service-accounts",
+  "baas-functions",
+  "cron",
+  "webhooks",
+  "event-stream",
+  "object-file-api",
+] as const;
+
+export type RuntimeIntegrationCapability = (typeof RUNTIME_INTEGRATION_CAPABILITIES)[number];
+export type RuntimeIntegrationProbe = () => boolean | Promise<boolean>;
+export type RuntimeIntegrationProbes = Partial<
+  Record<RuntimeIntegrationCapability, RuntimeIntegrationProbe>
+>;
+
+export interface RuntimeIntegrationManifestEntry {
+  key: RuntimeIntegrationCapability;
+  status: "enabled" | "degraded";
+  verification: "adapter" | "probe";
+}
+
 export interface BaaSRuntimeOptions {
   /** Control-plane API URL. Defaults to BAAS_RUNTIME_URL then BAAS_API_URL. */
   endpoint?: string;
@@ -125,6 +150,11 @@ export interface BaaSRuntimeOptions {
   users?: RuntimeUserAdapter;
   /** Exposes the application's object store to its BaaS dashboard and CLI. */
   storage?: RuntimeObjectStorageAdapter;
+  /**
+   * Verifies optional BaaS integration surfaces before every heartbeat.
+   * Return true only when the capability is ready in this running service.
+   */
+  integrations?: RuntimeIntegrationProbes;
   /** How often connected management commands are checked. Default 2,000ms. */
   commandPollIntervalMs?: number;
   /** Maximum pending records of each kind. Default 1,000. */
@@ -353,6 +383,7 @@ export class BaaSRuntime {
   private readonly heartbeatEnabled: boolean;
   private readonly userAdapter?: RuntimeUserAdapter;
   private readonly storageAdapter?: RuntimeObjectStorageAdapter;
+  private readonly integrationProbes: RuntimeIntegrationProbes;
   private readonly commandPollIntervalMs: number;
   private readonly queues: Record<QueueKind, Array<MetricRecord | LogRecord | EventRecord>> = {
     metrics: [],
@@ -381,9 +412,15 @@ export class BaaSRuntime {
     this.heartbeatEnabled = options.heartbeat !== false;
     this.userAdapter = options.users;
     this.storageAdapter = options.storage;
+    this.integrationProbes = { ...(options.integrations ?? {}) };
     this.commandPollIntervalMs = Math.max(5, options.commandPollIntervalMs ?? DEFAULT_COMMAND_POLL_INTERVAL_MS);
 
-    if ((this.userAdapter || this.storageAdapter) && !this.heartbeatEnabled) {
+    if (
+      (this.userAdapter ||
+        this.storageAdapter ||
+        Object.keys(this.integrationProbes).length > 0) &&
+      !this.heartbeatEnabled
+    ) {
       throw new Error("Connected runtime management requires heartbeat to remain enabled");
     }
 
@@ -586,11 +623,14 @@ export class BaaSRuntime {
       const capabilities: string[] = [];
       if (this.userAdapter) capabilities.push("runtime-users");
       if (this.storageAdapter) capabilities.push("object-storage");
+      const integrationManifest = await this.integrationManifest();
       const response = await this.post("/runtime/v1/heartbeat", {
         runtime_name: this.service,
         sdk_name: "@dutchwebservices/baas-runtime",
         sdk_version: VERSION,
         capabilities,
+        capability_manifest_version: 1,
+        integration_manifest: integrationManifest,
       });
       if (!response) return 0;
       const parsed = (await response.json()) as { heartbeat_interval_seconds?: number };
@@ -599,6 +639,44 @@ export class BaaSRuntime {
       this.reportError(error);
       return 60_000;
     }
+  }
+
+  private async integrationManifest(): Promise<RuntimeIntegrationManifestEntry[]> {
+    const manifest = new Map<RuntimeIntegrationCapability, RuntimeIntegrationManifestEntry>();
+    if (this.userAdapter) {
+      manifest.set("runtime-users", {
+        key: "runtime-users",
+        status: "enabled",
+        verification: "adapter",
+      });
+    }
+    if (this.storageAdapter) {
+      manifest.set("blob-storage", {
+        key: "blob-storage",
+        status: "enabled",
+        verification: "adapter",
+      });
+    }
+
+    for (const key of RUNTIME_INTEGRATION_CAPABILITIES) {
+      const probe = this.integrationProbes[key];
+      if (!probe || manifest.get(key)?.status === "enabled") continue;
+      try {
+        manifest.set(key, {
+          key,
+          status: (await probe()) === true ? "enabled" : "degraded",
+          verification: "probe",
+        });
+      } catch (error) {
+        this.reportError(error);
+        manifest.set(key, { key, status: "degraded", verification: "probe" });
+      }
+    }
+
+    return RUNTIME_INTEGRATION_CAPABILITIES.flatMap((key) => {
+      const entry = manifest.get(key);
+      return entry ? [entry] : [];
+    });
   }
 
   private scheduleHeartbeat(interval: number): void {

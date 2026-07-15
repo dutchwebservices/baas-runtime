@@ -23,6 +23,7 @@ __export(index_exports, {
   BaaSClient: () => BaaSClient,
   BaaSError: () => BaaSError,
   BaaSRuntime: () => BaaSRuntime,
+  RUNTIME_INTEGRATION_CAPABILITIES: () => RUNTIME_INTEGRATION_CAPABILITIES,
   VERSION: () => VERSION,
   createBaasClient: () => createBaasClient,
   createBaasRuntime: () => createBaasRuntime
@@ -399,7 +400,19 @@ function createBaasClient(options = {}) {
 }
 
 // src/index.ts
-var VERSION = "0.5.0";
+var VERSION = "0.6.0";
+var RUNTIME_INTEGRATION_CAPABILITIES = [
+  "runtime-users",
+  "blob-storage",
+  "redis",
+  "schema-builder",
+  "service-accounts",
+  "baas-functions",
+  "cron",
+  "webhooks",
+  "event-stream",
+  "object-file-api"
+];
 var DEFAULT_MAX_QUEUE_SIZE = 1e3;
 var DEFAULT_FLUSH_INTERVAL_MS = 1e3;
 var DEFAULT_TIMEOUT_MS = 5e3;
@@ -512,6 +525,7 @@ var BaaSRuntime = class {
   heartbeatEnabled;
   userAdapter;
   storageAdapter;
+  integrationProbes;
   commandPollIntervalMs;
   queues = {
     metrics: [],
@@ -539,8 +553,9 @@ var BaaSRuntime = class {
     this.heartbeatEnabled = options.heartbeat !== false;
     this.userAdapter = options.users;
     this.storageAdapter = options.storage;
+    this.integrationProbes = { ...options.integrations ?? {} };
     this.commandPollIntervalMs = Math.max(5, options.commandPollIntervalMs ?? DEFAULT_COMMAND_POLL_INTERVAL_MS);
-    if ((this.userAdapter || this.storageAdapter) && !this.heartbeatEnabled) {
+    if ((this.userAdapter || this.storageAdapter || Object.keys(this.integrationProbes).length > 0) && !this.heartbeatEnabled) {
       throw new Error("Connected runtime management requires heartbeat to remain enabled");
     }
     if (options.required && !this.enabled) {
@@ -721,11 +736,14 @@ var BaaSRuntime = class {
       const capabilities = [];
       if (this.userAdapter) capabilities.push("runtime-users");
       if (this.storageAdapter) capabilities.push("object-storage");
+      const integrationManifest = await this.integrationManifest();
       const response = await this.post("/runtime/v1/heartbeat", {
         runtime_name: this.service,
         sdk_name: "@dutchwebservices/baas-runtime",
         sdk_version: VERSION,
-        capabilities
+        capabilities,
+        capability_manifest_version: 1,
+        integration_manifest: integrationManifest
       });
       if (!response) return 0;
       const parsed = await response.json();
@@ -734,6 +752,41 @@ var BaaSRuntime = class {
       this.reportError(error);
       return 6e4;
     }
+  }
+  async integrationManifest() {
+    const manifest = /* @__PURE__ */ new Map();
+    if (this.userAdapter) {
+      manifest.set("runtime-users", {
+        key: "runtime-users",
+        status: "enabled",
+        verification: "adapter"
+      });
+    }
+    if (this.storageAdapter) {
+      manifest.set("blob-storage", {
+        key: "blob-storage",
+        status: "enabled",
+        verification: "adapter"
+      });
+    }
+    for (const key of RUNTIME_INTEGRATION_CAPABILITIES) {
+      const probe = this.integrationProbes[key];
+      if (!probe || manifest.get(key)?.status === "enabled") continue;
+      try {
+        manifest.set(key, {
+          key,
+          status: await probe() === true ? "enabled" : "degraded",
+          verification: "probe"
+        });
+      } catch (error) {
+        this.reportError(error);
+        manifest.set(key, { key, status: "degraded", verification: "probe" });
+      }
+    }
+    return RUNTIME_INTEGRATION_CAPABILITIES.flatMap((key) => {
+      const entry = manifest.get(key);
+      return entry ? [entry] : [];
+    });
   }
   scheduleHeartbeat(interval) {
     if (!this.started || !this.enabled) return;
@@ -906,6 +959,7 @@ function createBaasRuntime(options = {}) {
   BaaSClient,
   BaaSError,
   BaaSRuntime,
+  RUNTIME_INTEGRATION_CAPABILITIES,
   VERSION,
   createBaasClient,
   createBaasRuntime
