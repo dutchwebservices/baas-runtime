@@ -368,11 +368,12 @@ function createBaasClient(options = {}) {
 }
 
 // src/index.ts
-var VERSION = "0.4.0";
+var VERSION = "0.5.0";
 var DEFAULT_MAX_QUEUE_SIZE = 1e3;
 var DEFAULT_FLUSH_INTERVAL_MS = 1e3;
 var DEFAULT_TIMEOUT_MS = 5e3;
 var DEFAULT_COMMAND_POLL_INTERVAL_MS = 2e3;
+var MAX_STORAGE_BRIDGE_BYTES = 4 * 1024 * 1024;
 function processEnv2(name) {
   const candidate = globalThis;
   return candidate.process?.env?.[name];
@@ -415,6 +416,51 @@ function connectedUser(user) {
     updated_at: safeString(user.updated_at ?? "") || null
   };
 }
+function connectedStorageObject(object) {
+  const size = Number(object.size);
+  return {
+    key: safeString(object.key),
+    size: Number.isFinite(size) && size >= 0 ? Math.floor(size) : -1,
+    content_type: safeString(object.content_type ?? "") || null,
+    etag: safeString(object.etag ?? "") || null,
+    created_at: safeString(object.created_at ?? "") || null,
+    updated_at: safeString(object.updated_at ?? "") || null
+  };
+}
+function validStorageObject(object) {
+  const normalized = connectedStorageObject(object);
+  if (!normalized.key || normalized.size < 0) {
+    throw new Error("Object storage adapter returned invalid object metadata");
+  }
+  return normalized;
+}
+function encodeBase64(data) {
+  if (data.byteLength > MAX_STORAGE_BRIDGE_BYTES) {
+    throw new Error(`Object exceeds the ${MAX_STORAGE_BRIDGE_BYTES}-byte dashboard transfer limit`);
+  }
+  if (typeof Buffer !== "undefined") return Buffer.from(data).toString("base64");
+  let binary = "";
+  const chunkSize = 32768;
+  for (let offset = 0; offset < data.length; offset += chunkSize) {
+    binary += String.fromCharCode(...data.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+function decodeBase64(value) {
+  const encoded = safeString(value);
+  if (!encoded) return new Uint8Array();
+  const canonicalBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+  if (encoded.length % 4 !== 0 || !canonicalBase64.test(encoded)) {
+    throw new Error("Storage write command contains invalid object data");
+  }
+  const estimatedBytes = Math.floor(encoded.length * 3 / 4);
+  if (estimatedBytes > MAX_STORAGE_BRIDGE_BYTES + 2) {
+    throw new Error(`Object exceeds the ${MAX_STORAGE_BRIDGE_BYTES}-byte dashboard transfer limit`);
+  }
+  if (typeof Buffer !== "undefined") return new Uint8Array(Buffer.from(encoded, "base64"));
+  const binary = atob(encoded);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
 var BaaSRuntime = class {
   endpoint;
   enabled;
@@ -434,6 +480,7 @@ var BaaSRuntime = class {
   fetchImpl;
   heartbeatEnabled;
   userAdapter;
+  storageAdapter;
   commandPollIntervalMs;
   queues = {
     metrics: [],
@@ -460,9 +507,10 @@ var BaaSRuntime = class {
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.heartbeatEnabled = options.heartbeat !== false;
     this.userAdapter = options.users;
+    this.storageAdapter = options.storage;
     this.commandPollIntervalMs = Math.max(5, options.commandPollIntervalMs ?? DEFAULT_COMMAND_POLL_INTERVAL_MS);
-    if (this.userAdapter && !this.heartbeatEnabled) {
-      throw new Error("Runtime user management requires heartbeat to remain enabled");
+    if ((this.userAdapter || this.storageAdapter) && !this.heartbeatEnabled) {
+      throw new Error("Connected runtime management requires heartbeat to remain enabled");
     }
     if (options.required && !this.enabled) {
       throw new Error("BAAS_RUNTIME_URL and BAAS_RUNTIME_TOKEN are required for this runtime");
@@ -501,8 +549,8 @@ var BaaSRuntime = class {
       const interval = await this.heartbeat();
       this.scheduleHeartbeat(interval);
     }
-    if (this.userAdapter) {
-      await this.syncUsers();
+    if (this.userAdapter || this.storageAdapter) {
+      if (this.userAdapter) await this.syncUsers();
       await this.pollCommands();
       this.scheduleCommandPoll();
     }
@@ -639,11 +687,14 @@ var BaaSRuntime = class {
   async heartbeat() {
     if (!this.enabled) return 0;
     try {
+      const capabilities = [];
+      if (this.userAdapter) capabilities.push("runtime-users");
+      if (this.storageAdapter) capabilities.push("object-storage");
       const response = await this.post("/runtime/v1/heartbeat", {
         runtime_name: this.service,
         sdk_name: "@dutchwebservices/baas-runtime",
         sdk_version: VERSION,
-        capabilities: this.userAdapter ? ["runtime-users"] : []
+        capabilities
       });
       if (!response) return 0;
       const parsed = await response.json();
@@ -675,7 +726,7 @@ var BaaSRuntime = class {
     }
   }
   async pollCommands() {
-    if (!this.started || !this.enabled || !this.userAdapter) return;
+    if (!this.started || !this.enabled || !this.userAdapter && !this.storageAdapter) return;
     const response = await this.post("/runtime/v1/commands/claim", { limit: 10 });
     if (!response) return;
     try {
@@ -686,9 +737,10 @@ var BaaSRuntime = class {
     }
   }
   async executeCommand(command) {
-    if (!this.userAdapter || !safeString(command.id)) return;
+    if (!safeString(command.id)) return;
     try {
       if (command.action === "users.create") {
+        if (!this.userAdapter) throw new Error("Runtime user adapter is not configured");
         const input = {
           username: safeString(command.payload.username),
           password: safeString(command.payload.password),
@@ -701,16 +753,65 @@ var BaaSRuntime = class {
         if (!user.id || !user.username) throw new Error("Runtime user adapter returned a user without id or username");
         await this.post(`/runtime/v1/commands/${encodeURIComponent(command.id)}/result`, { ok: true, user });
       } else if (command.action === "users.delete") {
+        if (!this.userAdapter) throw new Error("Runtime user adapter is not configured");
         const userRef = safeString(command.payload.user_ref);
         if (!userRef) throw new Error("User delete command is missing user_ref");
         await this.userAdapter.remove(userRef);
         await this.post(`/runtime/v1/commands/${encodeURIComponent(command.id)}/result`, { ok: true });
+      } else if (command.action === "storage.list") {
+        if (!this.storageAdapter) throw new Error("Object storage adapter is not configured");
+        const listed = await this.storageAdapter.list({
+          prefix: safeString(command.payload.prefix) || null,
+          limit: Math.max(1, Math.min(500, Number(command.payload.limit) || 200)),
+          offset: Math.max(0, Number(command.payload.offset) || 0)
+        });
+        const objects = (Array.isArray(listed) ? listed : listed.objects).map(validStorageObject);
+        const total = Array.isArray(listed) ? null : listed.total ?? null;
+        await this.post(`/runtime/v1/commands/${encodeURIComponent(command.id)}/result`, {
+          ok: true,
+          result: { objects, total }
+        });
+      } else if (command.action === "storage.write") {
+        if (!this.storageAdapter) throw new Error("Object storage adapter is not configured");
+        const key = safeString(command.payload.key);
+        if (!key) throw new Error("Storage write command is missing key");
+        const object = validStorageObject(await this.storageAdapter.write({
+          key,
+          data: decodeBase64(command.payload.data_base64),
+          contentType: safeString(command.payload.content_type) || null
+        }));
+        await this.post(`/runtime/v1/commands/${encodeURIComponent(command.id)}/result`, {
+          ok: true,
+          result: { object }
+        });
+      } else if (command.action === "storage.read") {
+        if (!this.storageAdapter) throw new Error("Object storage adapter is not configured");
+        const key = safeString(command.payload.key);
+        if (!key) throw new Error("Storage read command is missing key");
+        const read = await this.storageAdapter.read(key);
+        const object = validStorageObject(read);
+        if (read.data.byteLength !== object.size) {
+          throw new Error("Object storage adapter returned inconsistent object metadata");
+        }
+        await this.post(`/runtime/v1/commands/${encodeURIComponent(command.id)}/result`, {
+          ok: true,
+          result: { object, data_base64: encodeBase64(read.data) }
+        });
+      } else if (command.action === "storage.delete") {
+        if (!this.storageAdapter) throw new Error("Object storage adapter is not configured");
+        const key = safeString(command.payload.key);
+        if (!key) throw new Error("Storage delete command is missing key");
+        await this.storageAdapter.remove(key);
+        await this.post(`/runtime/v1/commands/${encodeURIComponent(command.id)}/result`, {
+          ok: true,
+          result: {}
+        });
       } else {
         throw new Error(`Unsupported runtime command: ${String(command.action)}`);
       }
-      await this.syncUsers();
+      if (this.userAdapter && command.action.startsWith("users.")) await this.syncUsers();
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Runtime user operation failed";
+      const message = error instanceof Error ? error.message : "Connected runtime operation failed";
       await this.post(`/runtime/v1/commands/${encodeURIComponent(command.id)}/result`, {
         ok: false,
         error: message.slice(0, 2e3)
@@ -719,7 +820,7 @@ var BaaSRuntime = class {
     }
   }
   scheduleCommandPoll() {
-    if (!this.started || !this.enabled || !this.userAdapter) return;
+    if (!this.started || !this.enabled || !this.userAdapter && !this.storageAdapter) return;
     this.commandTimer = setTimeout(async () => {
       await this.pollCommands();
       this.scheduleCommandPoll();

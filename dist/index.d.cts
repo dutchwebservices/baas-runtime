@@ -266,7 +266,7 @@ declare function createBaasClient(options?: BaaSClientOptions): BaaSClient;
  * BaaS Runtime SDK.  It has no runtime dependencies and is safe to use in
  * Node 18+ servers, including applications that are not hosted by BaaS.
  */
-declare const VERSION = "0.4.0";
+declare const VERSION = "0.5.0";
 
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | {
@@ -309,6 +309,40 @@ interface RuntimeUserAdapter {
     /** Delete a user by id, username, or email. */
     remove: (userRef: string) => Promise<void>;
 }
+interface ConnectedStorageObject {
+    key: string;
+    size: number;
+    content_type?: string | null;
+    etag?: string | null;
+    created_at?: string | null;
+    updated_at?: string | null;
+}
+interface RuntimeStorageListInput {
+    prefix?: string | null;
+    limit: number;
+    offset: number;
+}
+interface RuntimeStorageWriteInput {
+    key: string;
+    data: Uint8Array;
+    contentType?: string | null;
+}
+interface RuntimeStorageReadResult extends ConnectedStorageObject {
+    data: Uint8Array;
+}
+interface RuntimeObjectStorageAdapter {
+    /** List objects from the application's existing object store. */
+    list: (input: RuntimeStorageListInput) => Promise<ConnectedStorageObject[] | {
+        objects: ConnectedStorageObject[];
+        total?: number | null;
+    }>;
+    /** Create or replace an object without exposing provider credentials to BaaS. */
+    write: (input: RuntimeStorageWriteInput) => Promise<ConnectedStorageObject>;
+    /** Read an object for a bounded dashboard or CLI administration transfer. */
+    read: (key: string) => Promise<RuntimeStorageReadResult>;
+    /** Delete an object by key. */
+    remove: (key: string) => Promise<void>;
+}
 interface BaaSRuntimeOptions {
     /** Control-plane API URL. Defaults to BAAS_RUNTIME_URL then BAAS_API_URL. */
     endpoint?: string;
@@ -322,7 +356,9 @@ interface BaaSRuntimeOptions {
     heartbeat?: boolean;
     /** Exposes the application's existing user store to its BaaS dashboard and CLI. */
     users?: RuntimeUserAdapter;
-    /** How often user-management commands are checked. Default 2,000ms. */
+    /** Exposes the application's object store to its BaaS dashboard and CLI. */
+    storage?: RuntimeObjectStorageAdapter;
+    /** How often connected management commands are checked. Default 2,000ms. */
     commandPollIntervalMs?: number;
     /** Maximum pending records of each kind. Default 1,000. */
     maxQueueSize?: number;
@@ -393,6 +429,7 @@ declare class BaaSRuntime {
     private readonly fetchImpl?;
     private readonly heartbeatEnabled;
     private readonly userAdapter?;
+    private readonly storageAdapter?;
     private readonly commandPollIntervalMs;
     private readonly queues;
     private flushTimer?;
@@ -427,4 +464,4 @@ declare class BaaSRuntime {
 }
 declare function createBaasRuntime(options?: BaaSRuntimeOptions): BaaSRuntime;
 
-export { type AccessTokenSource, type AuthSession, BaaSClient, type BaaSClientOptions, BaaSError, type BaaSRequestOptions, BaaSRuntime, type BaaSRuntimeOptions, type ConnectedRuntimeUser, type ConnectedRuntimeUserCreateInput, type EntityCollection, type EntityData, type EntityDocument, type EntityListOptions, type EventListOptions, type FunctionInvokeOptions, type HttpMiddleware, type JsonPrimitive, type JsonValue, type LogLevel, type MachineToken, type MetricKind, type Next, type RealtimeSubscription, type RealtimeSubscriptionOptions, type RequestLike, type ResponseLike, type RuntimeEvent, type RuntimeSettings, type RuntimeUser, type RuntimeUserAdapter, type StorageListOptions, type StorageObject, type TokenStorage, VERSION, type WebhookCreateInput, type WebhookSubscription, createBaasClient, createBaasRuntime };
+export { type AccessTokenSource, type AuthSession, BaaSClient, type BaaSClientOptions, BaaSError, type BaaSRequestOptions, BaaSRuntime, type BaaSRuntimeOptions, type ConnectedRuntimeUser, type ConnectedRuntimeUserCreateInput, type ConnectedStorageObject, type EntityCollection, type EntityData, type EntityDocument, type EntityListOptions, type EventListOptions, type FunctionInvokeOptions, type HttpMiddleware, type JsonPrimitive, type JsonValue, type LogLevel, type MachineToken, type MetricKind, type Next, type RealtimeSubscription, type RealtimeSubscriptionOptions, type RequestLike, type ResponseLike, type RuntimeEvent, type RuntimeObjectStorageAdapter, type RuntimeSettings, type RuntimeStorageListInput, type RuntimeStorageReadResult, type RuntimeStorageWriteInput, type RuntimeUser, type RuntimeUserAdapter, type StorageListOptions, type StorageObject, type TokenStorage, VERSION, type WebhookCreateInput, type WebhookSubscription, createBaasClient, createBaasRuntime };

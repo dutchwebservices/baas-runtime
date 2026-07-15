@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { BaaSError, createBaasClient, createBaasRuntime, type ConnectedRuntimeUser } from "./index.js";
+import {
+  BaaSError,
+  createBaasClient,
+  createBaasRuntime,
+  type ConnectedRuntimeUser,
+  type ConnectedStorageObject,
+} from "./index.js";
 
 function response(body: unknown, init: ResponseInit = {}): Response {
   return new Response(body === undefined ? null : JSON.stringify(body), {
@@ -202,6 +208,116 @@ test("rejects a users adapter when heartbeat is disabled", () => {
       users: {
         list: async () => [],
         create: async () => ({ id: "never", username: "never", roles: [] }),
+        remove: async () => undefined,
+      },
+    }),
+    /requires heartbeat/,
+  );
+});
+
+test("advertises and executes connected object storage management", async () => {
+  const objects = new Map<string, { data: Uint8Array; metadata: ConnectedStorageObject }>();
+  objects.set("documents/existing.txt", {
+    data: new TextEncoder().encode("existing"),
+    metadata: { key: "documents/existing.txt", size: 8, content_type: "text/plain", etag: "v1" },
+  });
+  const calls: Array<{ url: string; body: unknown }> = [];
+  let claimed = false;
+  const baas = createBaasRuntime({
+    endpoint: "https://api.example.test",
+    token: "baas_rt_example.abcdefghijklmnopqrstuvwxyz",
+    commandPollIntervalMs: 5,
+    storage: {
+      list: async ({ prefix, offset, limit }) => {
+        const matches = [...objects.values()]
+          .map(({ metadata }) => metadata)
+          .filter(({ key }) => !prefix || key.startsWith(prefix));
+        return { objects: matches.slice(offset, offset + limit), total: matches.length };
+      },
+      write: async ({ key, data, contentType }) => {
+        const metadata = { key, size: data.byteLength, content_type: contentType, etag: "v2" };
+        objects.set(key, { data, metadata });
+        return metadata;
+      },
+      read: async (key) => {
+        const stored = objects.get(key);
+        if (!stored) throw new Error("Object not found");
+        return { ...stored.metadata, data: stored.data };
+      },
+      remove: async (key) => {
+        objects.delete(key);
+      },
+    },
+    fetch: async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ url: path, body });
+      if (path === "/runtime/v1/commands/claim" && !claimed) {
+        claimed = true;
+        return response({
+          commands: [
+            { id: "storage-1", action: "storage.list", payload: { prefix: "documents/", limit: 10, offset: 0 } },
+            {
+              id: "storage-2",
+              action: "storage.write",
+              payload: {
+                key: "documents/new.txt",
+                content_type: "text/plain",
+                data_base64: Buffer.from("new object").toString("base64"),
+              },
+            },
+            { id: "storage-3", action: "storage.read", payload: { key: "documents/existing.txt" } },
+            { id: "storage-4", action: "storage.delete", payload: { key: "documents/new.txt" } },
+            {
+              id: "storage-5",
+              action: "storage.write",
+              payload: { key: "documents/invalid.txt", data_base64: "not-base64" },
+            },
+          ],
+        });
+      }
+      return response(path === "/runtime/v1/commands/claim" ? { commands: [] } : { accepted: 1 });
+    },
+  });
+
+  await baas.start();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  await baas.shutdown();
+
+  const heartbeat = calls.find((call) => call.url === "/runtime/v1/heartbeat");
+  assert.deepEqual((heartbeat?.body as { capabilities?: string[] }).capabilities, ["object-storage"]);
+  const results = calls.filter((call) => call.url.endsWith("/result"));
+  assert.equal(results.length, 5);
+  assert.equal(
+    ((results[0].body as { result: { objects: ConnectedStorageObject[] } }).result.objects[0]).key,
+    "documents/existing.txt",
+  );
+  assert.equal(
+    (results[1].body as { result: { object: ConnectedStorageObject } }).result.object.size,
+    10,
+  );
+  assert.equal(
+    Buffer.from(
+      (results[2].body as { result: { data_base64: string } }).result.data_base64,
+      "base64",
+    ).toString(),
+    "existing",
+  );
+  assert.equal(objects.has("documents/new.txt"), false);
+  assert.deepEqual(results[4].body, {
+    ok: false,
+    error: "Storage write command contains invalid object data",
+  });
+});
+
+test("rejects a storage adapter when heartbeat is disabled", () => {
+  assert.throws(
+    () => createBaasRuntime({
+      heartbeat: false,
+      storage: {
+        list: async () => [],
+        write: async ({ key, data }) => ({ key, size: data.byteLength }),
+        read: async (key) => ({ key, size: 0, data: new Uint8Array() }),
         remove: async () => undefined,
       },
     }),

@@ -9,7 +9,7 @@ server telemetry.
 The public source installation does not require a package-registry token:
 
 ```bash
-npm install github:dutchwebservices/baas-runtime#v0.4.0
+npm install github:dutchwebservices/baas-runtime#v0.5.0
 ```
 
 For an agent-assisted integration, install the public Codex skill from
@@ -81,7 +81,7 @@ const report = await baas.functions.invoke<{ total: number }>("/reports/daily", 
 });
 ```
 
-## Server connection, users, telemetry, and settings
+## Server connection, users, storage, telemetry, and settings
 
 Use the separate server-only helper after `baas-cli runtime connect`. The CLI
 writes `BAAS_RUNTIME_URL`, `BAAS_RUNTIME_TOKEN`, and the generated runtime's
@@ -102,6 +102,21 @@ const runtime = createBaasRuntime({
     },
     async remove(userRef) {
       await userService.remove(userRef);
+    },
+  },
+  storage: {
+    async list({ prefix, limit, offset }) {
+      return objectStore.list({ prefix, limit, offset });
+    },
+    async write({ key, data, contentType }) {
+      return objectStore.put({ key, data, contentType });
+    },
+    async read(key) {
+      const object = await objectStore.get(key);
+      return { ...object.metadata, data: object.data };
+    },
+    async remove(key) {
+      await objectStore.remove(key);
     },
   },
 });
@@ -127,8 +142,19 @@ refresh the dashboard index explicitly:
 await runtime.users.sync();
 ```
 
+With a `storage` adapter, the project dashboard and `baas-cli storage`
+commands can list, upload, download, and delete objects through the
+application's existing object-store service. The SDK advertises this capability
+only while the adapter is configured and its heartbeat is current, so an
+organization admin can distinguish a real integration from configuration
+alone. Provider credentials remain inside the application.
+
+Dashboard and CLI transfers through the administration bridge are limited to
+4 MiB per object. Use `createBaasClient().storage` or the application's direct
+upload flow for larger objects.
+
 Start one `BaaSRuntime` instance per long-running server process, never in
-browser code. Keep heartbeat enabled when a user adapter is configured; the SDK
+browser code. Keep heartbeat enabled when a user or storage adapter is configured; the SDK
 rejects that unsafe combination otherwise. `BaaSRuntime` also reports health, metrics, logs, custom events,
 and reads non-secret project settings. Its connection credential is
 server-only and cannot be used as an end-user or runtime-admin access token.
@@ -139,4 +165,14 @@ Verify the connected user store from the CLI:
 baas-cli users list PROJECT_ID
 baas-cli users create PROJECT_ID --username jane --password 'use-a-secret-value'
 baas-cli users delete PROJECT_ID jane
+```
+
+Verify the connected object store from the CLI:
+
+```bash
+baas-cli storage status PROJECT_ID
+baas-cli storage list PROJECT_ID --prefix documents/
+baas-cli storage upload PROJECT_ID documents/example.pdf --file ./example.pdf
+baas-cli storage download PROJECT_ID documents/example.pdf --out ./example.pdf
+baas-cli storage delete PROJECT_ID documents/example.pdf
 ```

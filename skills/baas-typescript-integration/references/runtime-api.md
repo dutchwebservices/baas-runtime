@@ -10,6 +10,7 @@ Use this reference while integrating the TypeScript SDK. The SDK surface mirrors
 | Own-runtime users | `createBaasRuntime({ users })` | Connected command/sync protocol | Existing server user service |
 | Machine token exchange | `auth.machineToken` | `/api/auth/m2m/token` | Server only; never browser secrets |
 | Object storage | `storage` | `/api/storage/objects/{key}` | End user or machine token |
+| Own-runtime object storage | `createBaasRuntime({ storage })` | Connected command protocol | Existing server object store |
 | Realtime event stream | `events.subscribe` | `/api/events/stream` | Runtime admin only |
 | Webhooks | `events.webhooks` | `/api/events/webhooks` | Runtime admin only |
 | Function call | `functions.invoke` | Function route | Function's configured auth mode |
@@ -79,3 +80,41 @@ A proper connection requires all of the following:
 After an out-of-band user mutation, call `await runtime.users.sync()`. Verify
 the bridge with `baas-cli users list PROJECT_ID`, followed by disposable
 create/delete commands.
+
+## Connected Own-Runtime Object Storage
+
+Use `createBaasClient().storage` for the generated runtime storage API. For an
+application that owns its server and object store, configure
+`createBaasRuntime({ storage })` so project admins can manage that store from
+the dashboard and CLI without exposing provider credentials.
+
+```ts
+const runtime = createBaasRuntime({
+  service: "api",
+  storage: {
+    list: (input) => objectStore.list(input),
+    write: async ({ key, data, contentType }) =>
+      objectStore.write({ key, body: data, contentType }),
+    read: async (key) => {
+      const object = await objectStore.read(key);
+      return { ...object.metadata, data: object.body };
+    },
+    remove: (key) => objectStore.remove(key),
+  },
+});
+
+await runtime.start();
+```
+
+A proper storage connection requires all of the following:
+
+1. `baas-cli runtime connect --project PROJECT_ID` has configured the server.
+2. SDK 0.5.0 or newer is running in a long-lived server process.
+3. A `storage` adapter advertises the `object-storage` capability.
+4. The authenticated runtime heartbeat is current.
+
+The control plane stores only safe capability and object metadata. Storage
+credentials remain in the application. Dashboard and CLI file transfers are
+limited to 4 MiB; use the application's public storage API or signed URLs for
+larger files. Verify with `baas-cli storage status PROJECT_ID`, then perform a
+disposable list/upload/download/delete round trip.

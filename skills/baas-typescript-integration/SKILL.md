@@ -14,7 +14,7 @@ Turn an existing TypeScript application into a working BaaS client in one focuse
 3. Install the SDK from the public source release:
 
    ```bash
-   npm install github:dutchwebservices/baas-runtime#v0.4.0
+   npm install github:dutchwebservices/baas-runtime#v0.5.0
    ```
 
 4. Add one small client module, such as `src/lib/baas.ts`. Use `createBaasClient` and one public runtime URL env variable:
@@ -35,13 +35,13 @@ Turn an existing TypeScript application into a working BaaS client in one focuse
 7. Add a real test for the flow. Use unit tests for client/service behavior and Playwright for sign-in plus the relevant create/read/update/delete or upload workflow.
 8. Run the repository's formatter, type check, test suite, and production build. Fix failures before reporting completion.
 
-When the application has its own server and user store, also follow the Own Server or BFF section. Do not create a parallel user collection merely to make dashboard user management work.
+When the application has its own server, user store, or object store, also follow the Own Server or BFF section. Adapt the existing services; do not create parallel storage merely to make dashboard management work.
 
 ## Security Boundary
 
 - Browser code may use only the generated runtime URL and an end-user access token.
 - Never place `BAAS_RUNTIME_TOKEN`, machine-client secrets, database credentials, or other server secrets in browser environment variables.
-- `createBaasRuntime` is server-only connection plumbing. Its optional user adapter executes control-plane commands through the application's own user service; the connection credential itself never authorizes entity or user API access.
+- `createBaasRuntime` is server-only connection plumbing. Its optional user and storage adapters execute bounded control-plane commands through the application's own services; the connection credential itself never authorizes public application API access.
 - Keep `auth.users`, webhook administration, event history, and scheduled-run controls in authenticated staff/admin surfaces. The runtime independently enforces these permissions.
 - Do not bypass owner-scoped data rules with client-side filtering.
 
@@ -53,7 +53,7 @@ For a server the customer operates, first run:
 baas-cli runtime connect --project PROJECT_ID
 ```
 
-This creates a project-only connection and writes server-only values to `.env.local`. Use both helpers on the server. If users must be manageable from the dashboard or CLI, inspect the existing user repository and auth service first, then adapt those services directly:
+This creates a project-only connection and writes server-only values to `.env.local`. Use both helpers on the server. If users or objects must be manageable from the dashboard or CLI, inspect the existing user, auth, and storage services first, then adapt those services directly:
 
 ```ts
 import { createBaasClient, createBaasRuntime } from "@dutchwebservices/baas-runtime";
@@ -70,6 +70,21 @@ const runtime = createBaasRuntime({
     },
     async remove(userRef) {
       await userService.remove(userRef);
+    },
+  },
+  storage: {
+    async list(input) {
+      return objectStore.list(input);
+    },
+    async write({ key, data, contentType }) {
+      return objectStore.write({ key, body: data, contentType });
+    },
+    async read(key) {
+      const object = await objectStore.read(key);
+      return { ...object.metadata, data: object.body };
+    },
+    async remove(key) {
+      await objectStore.remove(key);
     },
   },
 });
@@ -92,9 +107,13 @@ The adapter is the security boundary for an own runtime:
 - Call `await runtime.users.sync()` after user mutations that happen outside the adapter.
 - Add unit tests proving create uses the normal password-hashing path and list results contain no credential fields.
 - Verify the live bridge with `baas-cli users list PROJECT_ID`, create a disposable user, delete it, and confirm both the application and dashboard update.
+- Keep object-store credentials inside the application. Return only safe object metadata (`key`, `size`, content type, etag, and timestamps).
+- Enforce the application's normal key validation, authorization, retention, and audit path inside the storage adapter.
+- Dashboard and CLI transfers are capped at 4 MiB. Use the public application storage API or a signed upload flow for larger objects.
+- Verify object storage with `baas-cli storage status PROJECT_ID`, then list, upload, download, and delete one disposable object.
 
-The dashboard and CLI expose users only when SDK 0.4.0 or newer advertises the `runtime-users` capability and the heartbeat is live. A missing adapter or stale connection must remain unavailable; do not work around the resulting 409 by writing users into control-plane storage.
+The dashboard and CLI expose each management surface only when SDK 0.5.0 or newer advertises its capability and the heartbeat is live. `users` advertises `runtime-users`; `storage` advertises `object-storage`. A missing adapter or stale connection must remain unavailable; do not work around the resulting 409 by copying users or object credentials into control-plane storage.
 
 ## Completion Standard
 
-Report the changed client module, supplied public env variable, entities integrated, connected user adapter (when applicable), test commands/results, and any capability that needs dashboard-side configuration. Do not claim that runtime users are manageable until a live CLI list/create/delete round trip has used the application's real user service. Do not claim that an integration is complete until the application actually performs the requested runtime operation.
+Report the changed client module, supplied public env variable, entities integrated, connected adapters, test commands/results, and any capability that needs dashboard-side configuration. Do not claim that runtime users or object storage are manageable until a live CLI round trip has used the application's real service. Do not claim that an integration is complete until the application actually performs the requested runtime operation.
