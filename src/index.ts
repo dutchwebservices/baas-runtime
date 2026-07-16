@@ -3,7 +3,7 @@
  * Node 18+ servers, including applications that are not hosted by BaaS.
  */
 
-export const VERSION = "0.6.0";
+export const VERSION = "0.6.1";
 
 export {
   BaaSClient,
@@ -63,9 +63,21 @@ export interface ConnectedRuntimeUserCreateInput {
   roles: string[];
 }
 
+/** A role which the connected application explicitly permits BaaS administrators to assign. */
+export interface RuntimeUserRoleOption {
+  key: string;
+  label: string;
+  description?: string | null;
+}
+
 export interface RuntimeUserAdapter {
   /** Return users from the application's existing user store. Never include password data. */
   list: () => Promise<ConnectedRuntimeUser[]>;
+  /**
+   * Return the roles an administrator may assign through BaaS. This is
+   * metadata only: the application remains responsible for enforcing roles.
+   */
+  listRoles?: () => Promise<RuntimeUserRoleOption[]> | RuntimeUserRoleOption[];
   /** Create a user through the application's normal password hashing and validation path. */
   create: (input: ConnectedRuntimeUserCreateInput) => Promise<ConnectedRuntimeUser>;
   /** Delete a user by id, username, or email. */
@@ -292,6 +304,24 @@ function connectedUser(user: ConnectedRuntimeUser): ConnectedRuntimeUser {
     created_at: safeString(user.created_at ?? "") || null,
     updated_at: safeString(user.updated_at ?? "") || null,
   };
+}
+
+const RUNTIME_USER_ROLE_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
+
+function runtimeUserRoleOption(value: RuntimeUserRoleOption): RuntimeUserRoleOption {
+  const key = safeString(value.key);
+  const label = safeString(value.label);
+  const description = safeString(value.description ?? "");
+  if (!RUNTIME_USER_ROLE_KEY.test(key)) {
+    throw new Error("Runtime user role option has an invalid key");
+  }
+  if (!label || label.length > 120) {
+    throw new Error("Runtime user role option has an invalid label");
+  }
+  if (description.length > 280) {
+    throw new Error("Runtime user role option has an invalid description");
+  }
+  return description ? { key, label, description } : { key, label };
 }
 
 function connectedStorageObject(object: ConnectedStorageObject): ConnectedStorageObject {
@@ -624,20 +654,45 @@ export class BaaSRuntime {
       if (this.userAdapter) capabilities.push("runtime-users");
       if (this.storageAdapter) capabilities.push("object-storage");
       const integrationManifest = await this.integrationManifest();
-      const response = await this.post("/runtime/v1/heartbeat", {
+      const userRoleCatalog = await this.userRoleCatalog();
+      const payload: Record<string, unknown> = {
         runtime_name: this.service,
         sdk_name: "@dutchwebservices/baas-runtime",
         sdk_version: VERSION,
         capabilities,
         capability_manifest_version: 1,
         integration_manifest: integrationManifest,
-      });
+      };
+      if (userRoleCatalog !== undefined) {
+        payload.user_role_catalog = userRoleCatalog;
+      }
+      const response = await this.post("/runtime/v1/heartbeat", payload);
       if (!response) return 0;
       const parsed = (await response.json()) as { heartbeat_interval_seconds?: number };
       return Math.max(15_000, Number(parsed.heartbeat_interval_seconds ?? 60) * 1_000);
     } catch (error) {
       this.reportError(error);
       return 60_000;
+    }
+  }
+
+  private async userRoleCatalog(): Promise<RuntimeUserRoleOption[] | undefined> {
+    if (!this.userAdapter?.listRoles) return undefined;
+    try {
+      const catalog = await this.userAdapter.listRoles();
+      if (!Array.isArray(catalog)) {
+        throw new Error("Runtime user adapter returned an invalid role catalog");
+      }
+      const normalized = catalog.map(runtimeUserRoleOption);
+      if (new Set(normalized.map((role) => role.key)).size !== normalized.length) {
+        throw new Error("Runtime user adapter returned duplicate role keys");
+      }
+      return normalized;
+    } catch (error) {
+      // A catalogue must never stop telemetry or user synchronization. The
+      // dashboard falls back to legacy free-text roles until this is corrected.
+      this.reportError(error);
+      return undefined;
     }
   }
 

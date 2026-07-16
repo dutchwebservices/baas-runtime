@@ -142,6 +142,14 @@ test("manages an existing application user store only when a users adapter is co
     commandPollIntervalMs: 5,
     users: {
       list: async () => users,
+      listRoles: async () => [
+        {
+          key: "admin:operations",
+          label: "Operations administrator",
+          description: "Can manage operations.",
+        },
+        { key: "client", label: "Client" },
+      ],
       create: async (input) => {
         createdInputs.push(input);
         const user = { id: "user-2", ...input, roles: input.roles ?? [] };
@@ -195,6 +203,17 @@ test("manages an existing application user store only when a users adapter is co
   assert.deepEqual(removedRefs, ["user-1"]);
   const heartbeat = calls.find((call) => call.url === "/runtime/v1/heartbeat");
   assert.deepEqual((heartbeat?.body as { capabilities?: string[] }).capabilities, ["runtime-users"]);
+  assert.deepEqual(
+    (heartbeat?.body as { user_role_catalog?: unknown }).user_role_catalog,
+    [
+      {
+        key: "admin:operations",
+        label: "Operations administrator",
+        description: "Can manage operations.",
+      },
+      { key: "client", label: "Client" },
+    ],
+  );
   assert.ok(calls.some((call) => call.url === "/runtime/v1/users/sync"));
   const results = calls.filter((call) => call.url.endsWith("/result"));
   assert.equal(results.length, 2);

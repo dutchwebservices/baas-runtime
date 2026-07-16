@@ -266,7 +266,7 @@ declare function createBaasClient(options?: BaaSClientOptions): BaaSClient;
  * BaaS Runtime SDK.  It has no runtime dependencies and is safe to use in
  * Node 18+ servers, including applications that are not hosted by BaaS.
  */
-declare const VERSION = "0.6.0";
+declare const VERSION = "0.6.1";
 
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | {
@@ -301,9 +301,20 @@ interface ConnectedRuntimeUserCreateInput {
     name?: string | null;
     roles: string[];
 }
+/** A role which the connected application explicitly permits BaaS administrators to assign. */
+interface RuntimeUserRoleOption {
+    key: string;
+    label: string;
+    description?: string | null;
+}
 interface RuntimeUserAdapter {
     /** Return users from the application's existing user store. Never include password data. */
     list: () => Promise<ConnectedRuntimeUser[]>;
+    /**
+     * Return the roles an administrator may assign through BaaS. This is
+     * metadata only: the application remains responsible for enforcing roles.
+     */
+    listRoles?: () => Promise<RuntimeUserRoleOption[]> | RuntimeUserRoleOption[];
     /** Create a user through the application's normal password hashing and validation path. */
     create: (input: ConnectedRuntimeUserCreateInput) => Promise<ConnectedRuntimeUser>;
     /** Delete a user by id, username, or email. */
@@ -468,6 +479,7 @@ declare class BaaSRuntime {
     private getSettings;
     private httpMiddleware;
     private heartbeat;
+    private userRoleCatalog;
     private integrationManifest;
     private scheduleHeartbeat;
     private syncUsers;
@@ -480,4 +492,4 @@ declare class BaaSRuntime {
 }
 declare function createBaasRuntime(options?: BaaSRuntimeOptions): BaaSRuntime;
 
-export { type AccessTokenSource, type AuthSession, BaaSClient, type BaaSClientOptions, BaaSError, type BaaSRequestOptions, BaaSRuntime, type BaaSRuntimeOptions, type ConnectedRuntimeUser, type ConnectedRuntimeUserCreateInput, type ConnectedStorageObject, type EntityCollection, type EntityData, type EntityDocument, type EntityListOptions, type EventListOptions, type FunctionInvokeOptions, type HttpMiddleware, type JsonPrimitive, type JsonValue, type LogLevel, type MachineToken, type MetricKind, type Next, RUNTIME_INTEGRATION_CAPABILITIES, type RealtimeSubscription, type RealtimeSubscriptionOptions, type RequestLike, type ResponseLike, type RuntimeEvent, type RuntimeIntegrationCapability, type RuntimeIntegrationManifestEntry, type RuntimeIntegrationProbe, type RuntimeIntegrationProbes, type RuntimeObjectStorageAdapter, type RuntimeSettings, type RuntimeStorageListInput, type RuntimeStorageReadResult, type RuntimeStorageWriteInput, type RuntimeUser, type RuntimeUserAdapter, type StorageListOptions, type StorageObject, type TokenStorage, VERSION, type WebhookCreateInput, type WebhookSubscription, createBaasClient, createBaasRuntime };
+export { type AccessTokenSource, type AuthSession, BaaSClient, type BaaSClientOptions, BaaSError, type BaaSRequestOptions, BaaSRuntime, type BaaSRuntimeOptions, type ConnectedRuntimeUser, type ConnectedRuntimeUserCreateInput, type ConnectedStorageObject, type EntityCollection, type EntityData, type EntityDocument, type EntityListOptions, type EventListOptions, type FunctionInvokeOptions, type HttpMiddleware, type JsonPrimitive, type JsonValue, type LogLevel, type MachineToken, type MetricKind, type Next, RUNTIME_INTEGRATION_CAPABILITIES, type RealtimeSubscription, type RealtimeSubscriptionOptions, type RequestLike, type ResponseLike, type RuntimeEvent, type RuntimeIntegrationCapability, type RuntimeIntegrationManifestEntry, type RuntimeIntegrationProbe, type RuntimeIntegrationProbes, type RuntimeObjectStorageAdapter, type RuntimeSettings, type RuntimeStorageListInput, type RuntimeStorageReadResult, type RuntimeStorageWriteInput, type RuntimeUser, type RuntimeUserAdapter, type RuntimeUserRoleOption, type StorageListOptions, type StorageObject, type TokenStorage, VERSION, type WebhookCreateInput, type WebhookSubscription, createBaasClient, createBaasRuntime };
