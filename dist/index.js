@@ -949,6 +949,11 @@ function isPrivateWebhookHost(hostname) {
   if (octets.some((part) => part > 255)) return true;
   return octets[0] === 0 || octets[0] === 10 || octets[0] === 127 || octets[0] === 169 && octets[1] === 254 || octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31 || octets[0] === 192 && octets[1] === 168 || octets[0] >= 224;
 }
+function isDevelopmentLoopbackWebhookUrl(parsed) {
+  if (process.env.NODE_ENV === "production") return false;
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return (parsed.protocol === "http:" || parsed.protocol === "https:") && (host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1" || host === "::1");
+}
 function webhookUrl(value) {
   const normalized = safeString(value);
   if (!normalized || normalized.length > 2048) throw new Error("Webhook URL is invalid");
@@ -958,7 +963,8 @@ function webhookUrl(value) {
   } catch {
     throw new Error("Webhook URL is invalid");
   }
-  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.hash || !parsed.hostname || isPrivateWebhookHost(parsed.hostname)) {
+  const isDevelopmentLoopback = isDevelopmentLoopbackWebhookUrl(parsed);
+  if (!isDevelopmentLoopback && parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.hash || !parsed.hostname || !isDevelopmentLoopback && isPrivateWebhookHost(parsed.hostname)) {
     throw new Error("Webhook URL must be a public HTTPS destination");
   }
   return parsed.toString();

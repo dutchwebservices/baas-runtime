@@ -1232,7 +1232,7 @@ test("manages application-owned webhook subscriptions through the bounded adapte
               payload: {
                 name: "Order events",
                 description: "Notify the order service.",
-                url: "https://hooks.example.test/orders",
+                url: "http://127.0.0.1:48123/orders",
                 event_types: ["entity.created", "entity.updated"],
                 entities: ["orders"],
                 event_name_overrides: { "entity.created": "order.created" },
@@ -1303,7 +1303,7 @@ test("manages application-owned webhook subscriptions through the bounded adapte
     {
       name: "Order events",
       description: "Notify the order service.",
-      url: "https://hooks.example.test/orders",
+      url: "http://127.0.0.1:48123/orders",
       eventTypes: ["entity.created", "entity.updated"],
       entities: ["orders"],
       eventNameOverrides: { "entity.created": "order.created" },
