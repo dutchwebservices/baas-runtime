@@ -266,7 +266,7 @@ declare function createBaasClient(options?: BaaSClientOptions): BaaSClient;
  * BaaS Runtime SDK.  It has no runtime dependencies and is safe to use in
  * Node 18+ servers, including applications that are not hosted by BaaS.
  */
-declare const VERSION = "0.6.8";
+declare const VERSION = "0.6.10";
 
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | {

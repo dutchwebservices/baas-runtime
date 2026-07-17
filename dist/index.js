@@ -368,7 +368,7 @@ function createBaasClient(options = {}) {
 }
 
 // src/index.ts
-var VERSION = "0.6.8";
+var VERSION = "0.6.10";
 var RUNTIME_INTEGRATION_CAPABILITIES = [
   "runtime-users",
   "blob-storage",

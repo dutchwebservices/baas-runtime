@@ -3,7 +3,7 @@
  * Node 18+ servers, including applications that are not hosted by BaaS.
  */
 
-export const VERSION = "0.6.8";
+export const VERSION = "0.6.10";
 
 export {
   BaaSClient,
